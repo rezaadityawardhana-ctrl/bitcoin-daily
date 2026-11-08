@@ -41,6 +41,15 @@ jobs:
       - name: Install the optional AI dependency
         run: pip install anthropic
 
+      # Keep saved data between runs: government/fund holdings (fetched once a day instead of every run, which
+      # avoids ~4 minutes of rate-limit waiting) and the daily holder snapshots behind the 7-day changes.
+      - name: Restore saved data
+        uses: actions/cache@v4
+        with:
+          path: btc-daily/data
+          key: data-${{ github.run_id }}
+          restore-keys: data-
+
       - name: Build dashboard
         run: python3 run_daily.py --no-email --no-notify
 
