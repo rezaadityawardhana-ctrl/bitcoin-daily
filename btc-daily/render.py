@@ -4,6 +4,8 @@ import json
 import math
 from datetime import datetime
 
+import chart_view
+import webapp_view
 from indicators import ZONES
 
 ZONE_COLORS = {  # diverging: blue = cheap/accumulate, gray = neutral, red = expensive/take profit
@@ -66,8 +68,12 @@ def news_items(cycle, news, brief):
         for it in brief["items"]:
             idx = it["story_index"]
             ok = 0 <= idx < len(stories)
+            flags = list(stories[idx].get("flags", [])) if ok else []
+            if it.get("agenda_note"):
+                flags.insert(0, it["agenda_note"])
             items.append({**it, "category": stories[idx]["category"] if ok else "",
-                          "sources": stories[idx]["sources"] if ok else []})
+                          "sources": stories[idx]["sources"] if ok else [],
+                          "tone": it.get("sentiment", "neutral"), "flags": flags})
         research = [{"takeaway": r["takeaway"], "story": stories[r["story_index"]]}
                     for r in brief["research_takeaways"] if 0 <= r["story_index"] < len(stories)]
         return brief["overview"], items, research
@@ -75,6 +81,7 @@ def news_items(cycle, news, brief):
         "headline": s["title"], "what_happened": clip(s["summary"], 280), "why_it_matters": "",
         "label": "fact" if s["tier"] == 1 or s["corroborated"] else "report",
         "bull_view": "", "bear_view": "", "category": s["category"], "sources": s["sources"],
+        "tone": s.get("tone", "neutral"), "flags": s.get("flags", []),
     } for s in news["top"]]
     research = [{"takeaway": clip(s["summary"], 240), "story": s} for s in news["research"]]
     return None, items, research
@@ -105,6 +112,221 @@ def brief_summary(cycle, news, brief, spot) -> dict:
     if not news_points:
         news_points = ["A quiet news day: nothing material passed the filters."]
     return {"market": market, "score": score_line, "news": news_points}
+
+
+# ---------------------------------------------------------------- mood & flows
+TONE = {"bullish": ("▲", "Bullish", "t-bull"), "bearish": ("▼", "Bearish", "t-bear"), "neutral": ("●", "Neutral", "t-neu")}
+MOOD_BANDS = [(20, "Extreme fear", "#2f6fd0"), (40, "Fear", "#7fb2f0"), (60, "Neutral", "#a9a8a0"),
+              (80, "Greed", "#ee9e9d"), (100, "Euphoria", "#e34948")]
+ETF_ISSUER = {"IBIT": "BlackRock", "FBTC": "Fidelity", "GBTC": "Grayscale", "BTC": "Grayscale Mini", "ARKB": "ARK 21Shares",
+              "BITB": "Bitwise", "HODL": "VanEck", "BTCO": "Invesco", "EZBC": "Franklin", "BRRR": "CoinShares",
+              "BTCW": "WisdomTree", "MSBT": "Morgan Stanley"}
+
+
+def mood_color(v: float) -> str:
+    return next(c for upper, _, c in MOOD_BANDS if v < upper or upper == 100)
+
+
+def money(v: float, unit="m") -> str:
+    return f'{"+" if v >= 0 else "−"}${abs(v):,.0f}{unit}'
+
+
+def mood_scale(v: float) -> str:
+    lo, segs, labels = 0, [], []
+    for upper, label, color in MOOD_BANDS:
+        segs.append(f'<span style="flex:{upper - lo};background:{color}"></span>')
+        labels.append(f'<span style="flex:{upper - lo}">{label}</span>')
+        lo = upper
+    return (f'<div class="mscale">{"".join(segs)}<i style="left:{v:.1f}%"></i></div>'
+            f'<div class="mscale-labels">{"".join(labels)}</div>')
+
+
+def etf_card(etf: dict) -> str:
+    if "error" in etf or not etf.get("days"):
+        return '<div class="fcard"><span class="eyebrow dark">Spot ETF flows</span><p class="note">Unavailable today.</p></div>'
+    days = etf["days"][-15:]
+    peak = max(abs(d["total"]) for d in days) or 1
+    cols = []
+    for i, d in enumerate(days):
+        h = abs(d["total"]) / peak * 100
+        top = max(((f, v) for f, v in d["funds"].items() if v), key=lambda x: abs(x[1]), default=None)
+        tip = f'{fmt_date(d["date"])}: {money(d["total"])} net' + (f' · biggest: {top[0]} {money(top[1])}' if top else "")
+        bar = (f'<span class="ec-bar {"in" if d["total"] >= 0 else "out"}" style="height:{max(h, 1.5):.1f}%"></span>')
+        lab = datetime.fromisoformat(d["date"]).strftime("%-d %b") if i in (0, len(days) // 2, len(days) - 1) else ""
+        cols.append(f'<div class="ec" data-tip="{e(tip)}" tabindex="0"><div class="ec-up">{bar if d["total"] >= 0 else ""}</div>'
+                    f'<div class="ec-dn">{bar if d["total"] < 0 else ""}</div><div class="ec-lab">{lab}</div></div>')
+    movers = "".join(
+        f'<div class="mover"><span><b>{e(f)}</b> <span class="muted small">{e(ETF_ISSUER.get(f, ""))}</span></span>'
+        f'<span class="{"pos" if v >= 0 else "neg"}">{money(v)}</span></div>' for f, v in etf["movers_7d"][:4])
+    streak = etf["streak"]
+    streak_txt = (f'{abs(streak)} {"inflow" if streak > 0 else "outflow"} day{"s" if abs(streak) != 1 else ""} in a row'
+                  if streak else "")
+    return f'''<div class="fcard">
+  <span class="eyebrow dark">US spot ETF flows</span>
+  <div class="fbig"><strong class="{"pos" if etf["sum_7d"] >= 0 else "neg"}">{money(etf["sum_7d"])}</strong><span>last 7 days</span></div>
+  <div class="etf-cols" role="img" aria-label="Daily net ETF flows, last {len(days)} trading days">{"".join(cols)}</div>
+  <div class="ec-key"><span class="k in"></span>inflow <span class="k out"></span>outflow · hover a day</div>
+  <div class="movers"><div class="muted small">Biggest fund moves, 7 days</div>{movers}</div>
+  <em>{e(streak_txt)} · Source: Farside Investors</em>
+</div>'''
+
+
+def exchange_card(ex: dict) -> str:
+    if "error" in ex or not ex.get("series"):
+        return '<div class="fcard"><span class="eyebrow dark">Coins on exchanges</span><p class="note">Unavailable today.</p></div>'
+    vals = [v for _, v in ex["series"]]
+    lo, hi = min(vals), max(vals)
+    pts = " ".join(f'{i / (len(vals) - 1) * 100:.2f},{(1 - (v - lo) / ((hi - lo) or 1)) * 36 + 2:.2f}' for i, v in enumerate(vals))
+    c7 = ex["change_7d"]
+    reading = ("More coins are sitting where they can be sold quickly." if c7 and c7 > 0
+               else "Coins are leaving exchanges, usually into long-term storage.")
+    return f'''<div class="fcard">
+  <span class="eyebrow dark">Coins on exchanges</span>
+  <div class="fbig"><strong>{ex["balance"] / 1e6:.2f}M BTC</strong><span>held on exchanges</span></div>
+  <svg class="spark" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label="Exchange balance, last 60 days">
+    <polyline points="{pts}" fill="none" stroke="var(--s1)" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
+  <div class="kv2"><span>7 days</span><b class="{"neg" if c7 and c7 > 0 else "pos"}">{"+" if c7 >= 0 else "−"}{abs(c7):,.0f} BTC</b></div>
+  <div class="kv2"><span>30 days</span><b>{pct(ex["change_30d_pct"])}</b></div>
+  <p class="small">{reading}</p>
+  <em>60-day trend · Source: Coin Metrics</em>
+</div>'''
+
+
+def _chg_cell(v) -> str:
+    if v is None:
+        return "–"
+    return f'<span class="{"pos" if v >= 0 else "neg"}">{"+" if v >= 0 else "−"}{abs(v):,.0f}</span>'
+
+
+def _flag(cc) -> str:
+    if not cc or len(cc) != 2 or not cc.isalpha():
+        return ""
+    return "".join(chr(0x1F1E6 + ord(ch) - 65) for ch in cc.upper())
+
+
+def treasury_card(tr: dict) -> str:
+    """Largest known holders as a click-to-open dropdown: ETFs & funds, companies, governments, disclosed
+    individuals and lost/unmoved coins."""
+    if "error" in tr or not tr.get("groups"):
+        return '<div class="fcard wide"><span class="eyebrow dark">Largest bitcoin holders</span><p class="note">Unavailable today.</p></div>'
+    peak = max(h["pct_supply"] for rows in tr["groups"].values() for h in rows)
+    body, chips = [], []
+    show_first = 12
+    for group, rows in tr["groups"].items():
+        total = tr["totals"].get(group) or sum(h["btc"] for h in rows)
+        is_est = all(h["estimate"] for h in rows)
+        short = {"ETFs & funds": "ETFs & funds", "Public companies": "Companies", "Governments": "Governments",
+                 "Individuals (publicly disclosed)": "Individuals", "Lost & unmoved (estimates)": "Lost & unmoved"}.get(group, group)
+        amount = f"{total / 1e6:.2f}M" if total >= 1e6 else f"{total / 1e3:.0f}k"
+        chips.append(f'<span class="hchip"><b>{e(short)}</b> {"~" if is_est else ""}{amount} BTC '
+                     f'<span class="muted">{total / 21e6 * 100:.1f}%</span></span>')
+        count = f" · {len(rows)} holders" if len(rows) > 2 else ""
+        body.append(f'<tr class="grp"><td colspan="5">{e(group)}<span>{total:,.0f} BTC · {total / 21e6 * 100:.1f}% of 21M{count}</span></td></tr>')
+        for i, h in enumerate(rows):
+            est = (f' <span class="est" data-tip="{e(h["note"])}" tabindex="0">est.</span>' if h["estimate"] else "")
+            country = f'{_flag(h["country"])} {e(h["country"])}' if h["country"] else '<span class="muted">–</span>'
+            extra = ' class="extra"' if i >= show_first else ""
+            body.append(
+                f'<tr{extra}><td>{e(h["name"])}{est}</td><td>{country}</td><td class="num">{h["btc"]:,.0f}</td>'
+                f'<td class="num"><div class="pctcell"><span class="pbar"><i style="width:{h["pct_supply"] / peak * 100:.1f}%"></i></span>'
+                f'{h["pct_supply"]:.2f}%</div></td>'
+                f'<td class="num">{_chg_cell(h["chg_7d"]) if not h["estimate"] else "<span class=muted>n/a</span>"}</td></tr>')
+        if len(rows) > show_first:
+            body.append(f'<tr class="more-row"><td colspan="5"><button type="button" class="more-btn" '
+                        f'onclick="this.closest(\'table\').classList.toggle(\'show-all\');'
+                        f'this.textContent=this.closest(\'table\').classList.contains(\'show-all\')?\'Show fewer\':\'Show all {len(rows)} {e(short)}\'">'
+                        f'Show all {len(rows)} {e(short)}</button></td></tr>')
+    note = ("7-day changes fill in after a week of daily snapshots." if tr["history_days"] < 8
+            else "7-day changes compare with the snapshot from a week ago.")
+    big = tr.get("biggest_7d")
+    big_txt = (f'<p class="small">Biggest 7-day move: <b>{e(big["name"])}</b> {"+" if big["chg_7d"] >= 0 else "−"}{abs(big["chg_7d"]):,.0f} BTC.</p>'
+               if big else "")
+    return f'''<details class="fcard wide holders">
+  <summary>
+    <div class="h-sum-top"><span class="eyebrow dark">Largest bitcoin holders</span><span class="h-toggle"><span class="t-open">Show table</span><span class="t-close">Hide table</span> ▾</span></div>
+    <div class="hchips">{"".join(chips)}</div>
+  </summary>
+  <div class="table-wrap"><table class="tr-table">
+    <thead><tr><th>Holder</th><th>Country</th><th class="num">BTC</th><th class="num">% of 21M</th><th class="num">7 days</th></tr></thead>
+    <tbody>{"".join(body)}</tbody></table></div>
+  {big_txt}
+  <em>{note} ETFs & funds: bitcointreasuries.net. Companies and governments: CoinGecko. Updated daily. Individuals and lost
+  coins: published estimates, not live (hover "est." for the source).</em>
+</details>'''
+
+
+def chf_facts(cycle, price_usd, market) -> dict | None:
+    """All-time high, 200-week MA and realized price in CHF.
+    ATH and 200-week MA come from Kraken BTC/CHF candles; realized price (an on-chain USD cost basis) is converted at
+    today's rate."""
+    chf, ta_data = market.get("chf"), market.get("ta")
+    if not chf or not ta_data:
+        return None
+    now = chf["btc_chf"]
+    d, w = ta_data["candles"]["chf_d"], ta_data["candles"]["chf_w"]
+    ath = max(c[4] for c in d)
+    wc = [c[4] for c in w]
+    wma = sum(wc[-200:]) / 200 if len(wc) >= 200 else None
+    rp = cycle["realized_price"] * now / price_usd
+    return {"now": now, "ath": ath, "wma200": wma, "realized": rp}
+
+
+def facts_table(cycle, price, market) -> str:
+    c = chf_facts(cycle, price, market)
+    cell = lambda v, now, sym: (f'<td><strong>{sym}{v:,.0f}</strong><em>{pct(now / v - 1, 0)}</em></td>' if v else "<td>–</td>")
+    rows = [("All-time high", cycle["ath"]["price"], c and c["ath"]),
+            ("200-week MA", cycle["wma200"], c and c["wma200"]),
+            ("Realized price", cycle["realized_price"], c and c["realized"])]
+    body = "".join(f'<tr><th scope="row">{label}</th>{cell(u, price, "$")}{cell(f, c["now"], "CHF ") if c else ""}</tr>'
+                   for label, u, f in rows)
+    head = '<tr><th></th><th>USD</th>' + ('<th>CHF</th>' if c else "") + "</tr>"
+    return (f'<table class="h-facts2" title="% = how far today\'s price is from each level">{head}{body}</table>'
+            '<div class="h-note">% = distance of today\'s price from each level. CHF realized price converted at today\'s rate.</div>')
+
+
+def chf_block(cycle, chf) -> str:
+    """BTC price in Swiss francs (tap to open the CHF chart)."""
+    if not chf:
+        return ""
+    fx1 = chf.get("fx_change_1d")
+    btc_chf_1d = ((1 + cycle["change_1d"]) * (1 + fx1) - 1) if fx1 is not None else None
+    return f'''<div class="chf">
+        <div class="chf-price price-btn" data-open-chart="chf" role="button" tabindex="0" aria-label="Open BTC/CHF chart"><span class="cur">CHF</span><span data-live="chf">{chf["btc_chf"]:,.0f}</span>{delta(btc_chf_1d) if btc_chf_1d is not None else ""}<span class="dl">24h</span></div>
+      </div>'''
+
+
+def mood_section(market: dict) -> str:
+    mood, flows = market["mood"], market["flows"]
+    if mood.get("value") is None:
+        head = '<p class="note">Mood data unavailable today.</p>'
+    else:
+        v = mood["value"]
+        parts = "".join(
+            f'<div class="mpart"><div class="mp-top"><span>{e(p["name"])} <span class="muted small">{p["weight"]:.0%}</span></span>'
+            f'<span class="mp-detail">{e(p["detail"])}</span></div>'
+            f'<div class="mp-bar"><span style="left:{p["score"]:.0f}%;background:{mood_color(p["score"])}"></span></div></div>'
+            for p in mood["parts"])
+        head = f'''<div class="mood-head"><span class="mood-num">{v:.0f}</span>
+      <div><div class="mood-label"><span style="background:{mood_color(v)}"></span>{e(mood["label"])}</div>
+      <div class="small muted">Blend of the inputs below · 0 = extreme fear, 100 = euphoria</div></div></div>
+    {mood_scale(v)}
+    <div class="mparts">{parts}</div>'''
+    bullets = "".join(f"<li>{e(t)}</li>" for t in market["interpretation"])
+    src = "AI analysis (Claude)" if market["interp_ai"] else "Rule-based · add an Anthropic key for AI analysis"
+    return f'''<section class="panel" id="mood">
+  <div class="phead"><h2>Market mood &amp; money flows</h2><span class="meta-note">What headlines feel vs what money does</span></div>
+  <div class="cols even">
+    <div>{head}</div>
+    <div class="read">
+      <div class="read-head"><h3>How to read today</h3><span class="ai-tag">{e(src)}</span></div>
+      <ul>{bullets}</ul>
+      <p class="small muted">Rule of thumb: headlines describe what already happened. Flows show what money is doing now.
+      Extreme fear at low valuations has historically been a better time to buy than to sell.</p>
+    </div>
+  </div>
+  <h3 class="sub">Institutional &amp; whale moves</h3>
+  <div class="flow-grid">{etf_card(flows.get("etf", {}))}{exchange_card(flows.get("exchanges", {}))}{treasury_card(flows.get("treasuries", {}))}</div>
+</section>'''
 
 
 # ---------------------------------------------------------------- dashboard parts
@@ -154,11 +376,15 @@ def stories_html(items) -> str:
             views = (f'<div class="views"><div class="bull"><span class="vlabel">▲ Bull reading</span>{e(it["bull_view"])}</div>'
                      f'<div class="bear"><span class="vlabel">▼ Bear reading</span>{e(it["bear_view"])}</div></div>')
         why = f'<p class="why"><span>Why it matters</span>{e(it["why_it_matters"])}</p>' if it.get("why_it_matters") else ""
+        icon, tlabel, tcls = TONE.get(it.get("tone", "neutral"), TONE["neutral"])
+        flags = "".join(f"<li>{e(f)}</li>" for f in it.get("flags", []))
+        flags_html = f'<ul class="agenda"><li class="ag-h">Agenda check</li>{flags}</ul>' if flags else ""
         out.append(f'''<article class="story">
-  <div class="meta"><span class="badge b-{e(it["label"])}">{e(LABEL_TEXT.get(it["label"], it["label"]))}</span>
+  <div class="meta"><span class="tone {tcls}">{icon} {tlabel}</span><span class="badge b-{e(it["label"])}">{e(LABEL_TEXT.get(it["label"], it["label"]))}</span>
   <span class="cat">{e(it.get("category", ""))}</span></div>
   <h3>{e(it["headline"])}</h3>
   <p class="body">{e(it["what_happened"])}</p>{why}{views}
+  {flags_html}
   <div class="sources">{sources_html(it["sources"])}</div>
 </article>''')
     return "\n".join(out)
@@ -191,60 +417,156 @@ def indicator_cards(cycle) -> str:
     return "\n".join(cards)
 
 
-def backtest_rows(cycle) -> str:
-    rows = []
-    for b in cycle["backtest"]:
-        key = _zone_key(float(b["band"].split("–")[0]))
-        rows.append(f'<tr><td><span class="swatch" style="background:{ZONE_COLORS[key]}"></span>{e(b["band"])} · {e(b["label"])}</td>'
-                    f'<td class="num">{b["days"]:,}</td><td class="num">{pct(b["median"], 0)}</td>'
-                    f'<td class="num">{pct(b["pct_positive"], 0, sign=False)}</td></tr>')
-    return "\n".join(rows)
-
-
-def past_turns(cycle) -> str:
-    h = {x["d"]: x for x in cycle["history"]}
-    turns = [("2015-01-14", "Cycle bottom"), ("2017-12-17", "Cycle top"), ("2018-12-15", "Cycle bottom"),
-             ("2021-04-14", "First 2021 top"), ("2021-11-10", "Cycle top"), ("2022-11-21", "Cycle bottom"),
-             ("2024-03-14", "Pre-halving high"), ("2025-10-06", "Cycle top (ATH)")]
-    rows = []
-    for d, label in turns:
-        if d in h:
-            k = _zone_key(h[d]["s"])
-            rows.append(f'<tr><td>{fmt_date(d)}</td><td>{e(label)}</td><td class="num">{usd(h[d]["p"])}</td>'
-                        f'<td class="num"><span class="swatch" style="background:{ZONE_COLORS[k]}"></span>{h[d]["s"]:.0f}</td></tr>')
-    return "\n".join(rows)
-
-
 EXIT_STYLE = {  # status -> (css class, icon)
     "waiting": ("ex-idle", "○"), "watch": ("ex-watch", "◔"), "armed": ("ex-armed", "◑"),
     "triggered": ("ex-fired", "●"), "closed": ("ex-closed", "◉"),
 }
 
 
+def _k(v) -> str:
+    return f"${v / 1000:,.1f}k"
+
+
+def mining_card(cycle) -> str:
+    m = cycle.get("mining")
+    if not m:
+        return ('<div class="kpi mining-card"><span class="eyebrow dark">Network security &amp; cost to mine 1 BTC</span>'
+                '<p class="note">Mining data unavailable today.</p></div>')
+    c, a = m["electricity_cost"], m["assumptions"]
+    price, all_in = m["price"], m["all_in_cost"]
+    lo = min(c["low"], price) * 0.85
+    hi = max(c["high"], all_in, price) * 1.08
+    x = lambda v: (v - lo) / (hi - lo) * 100
+    eff, kwh = a["efficiency_j_per_th"], a["electricity_usd_kwh"]
+    zone_cls = {"capitulation": "neg", "squeeze": "warn", "healthy": "pos", "rich": "pos"}[m["zone"]]
+    zone_txt = {"capitulation": "Below electricity cost", "squeeze": "Miner squeeze", "healthy": "Miners profitable",
+                "rich": "Very high margins"}[m["zone"]]
+    return f'''<div class="kpi mining-card" id="network">
+  <span class="eyebrow dark">Network security &amp; cost to mine 1 BTC</span>
+  <div class="mine-grid">
+    <div class="mine-left">
+      <div class="mstat"><strong>{m["hashrate_eh"]:,.0f} EH/s</strong><span>hashrate · {pct(m["hashrate_change_30d"])} in 30 days</span></div>
+      <p class="small">Hashrate is the computing power securing the network. Rising hashrate means miners keep investing.</p>
+      <div class="kv2"><span>Miner revenue (hashprice)</span><b>${m["hashprice_ph_day"]:,.2f} / PH / day</b></div>
+      <div class="kv2"><span>Break-even power price, {eff["mid"]:.0f} J/TH machine</span><b>${m["breakeven_kwh"]:.3f} / kWh</b></div>
+      <div class="kv2"><span>New BTC mined per day (incl. fees)</span><b>{m["btc_per_day"]:,.0f} BTC</b></div>
+    </div>
+    <div class="mine-right">
+      <div class="mstat"><strong>{_k(c["mid"])}</strong><span>electricity cost per BTC (est.) · all-in {_k(all_in)}</span></div>
+      <div class="cost-scale" role="img" aria-label="Price {_k(price)} versus electricity cost {_k(c["mid"])} and all-in cost {_k(all_in)}">
+        <span class="cs-range" style="left:{x(c["low"]):.1f}%;width:{x(c["high"]) - x(c["low"]):.1f}%"></span>
+        <span class="cs-tick" style="left:{x(c["mid"]):.1f}%"><b>Electricity {_k(c["mid"])}</b></span>
+        <span class="cs-tick allin" style="left:{x(all_in):.1f}%"><b>All-in {_k(all_in)}</b></span>
+        <span class="cs-price" style="left:{x(price):.1f}%"><b>Price {_k(price)}</b></span>
+      </div>
+      <div class="cs-legend"><span class="k range"></span>electricity cost range {_k(c["low"])}–{_k(c["high"])}</div>
+      <div class="kv2"><span>Price vs electricity cost</span><b>{pct(m["price_vs_electricity"], 0)}</b></div>
+      <div class="kv2"><span>Price vs all-in cost</span><b>{pct(m["price_vs_all_in"], 0)}</b></div>
+      <p class="small"><span class="zchip {zone_cls}">{zone_txt}</span> {e(m["reading"])}</p>
+    </div>
+  </div>
+  <em>Estimate, not a reported figure. Assumes average machine efficiency {eff["low"]:.0f}–{eff["high"]:.0f} J/TH
+  (mid {eff["mid"]:.0f}), power ${kwh["low"]:.3f}–${kwh["high"]:.3f}/kWh (mid ${kwh["mid"]:.3f}), and electricity at
+  {a["electricity_share"]:.0%} of all-in cost. 7-day averages. Data: Coin Metrics.</em>
+</div>'''
+
+
 def exit_card(cycle) -> str:
     x = cycle["exit"]
     cls, icon = EXIT_STYLE[x["status"]]
-    vs = x["price_vs_ma20w"]
+    vs = x["price_vs_exit_ma"]
     steps = ('<li><b>Scale-out steps:</b> each new all-time high inside the window → sell a small slice (e.g. 5–10%).</li>'
-             '<li><b>Exit trigger:</b> first weekly close below the 20-week MA after a new high → sell a bigger tranche.</li>')
+             '<li><b>Exit trigger:</b> first weekly close below the 50-day MA after a new high → sell a bigger tranche.</li>')
     return f'''<div class="kpi exit-card {cls}">
   <span class="eyebrow dark">Exit signal · late-cycle sell rule</span>
   <div class="exit-status"><span class="exit-icon">{icon}</span><strong>{e(x["label"])}</strong></div>
   <p>{e(x["detail"])}</p>
   <ul class="exit-rules">{steps}</ul>
-  <em>Exit window: 12–24 months after each halving · 20-week MA now {usd(x["ma20w"])} (price {pct(vs, 0)} vs it)</em>
+  <em>Exit window: 12–24 months after each halving · 50-day MA now {usd(x["exit_ma"])} (price {pct(vs, 0)} vs it)</em>
 </div>'''
 
 
-def past_exits(cycle) -> str:
+def zone_return_chart(cycle) -> str:
+    """Horizontal bars: median price change one year after each score zone (diverging around 0)."""
+    bands = [b for b in cycle["backtest"] if b["median"] is not None]
+    lo = min(0.0, min(b["median"] for b in bands)) - 0.05
+    hi = max(b["median"] for b in bands) + 0.15
+    zero = (0 - lo) / (hi - lo) * 100
     rows = []
-    for ev in cycle["exit"]["events"]:
-        rows.append(f'<tr><td>{fmt_date(ev["high_date"])}<div class="muted small">{usd(ev["high"])}</div></td>'
-                    f'<td>{fmt_date(ev["date"])}<div class="muted small">{usd(ev["price"])}</div></td>'
-                    f'<td class="num">{pct(ev["from_high"], 0)}</td>'
-                    f'<td class="num">{pct(ev["later_low"], 0) if ev["later_low"] is not None else "–"}'
-                    f'{"" if ev["low_final"] else "<div class=\'muted small\'>so far</div>"}</td></tr>')
+    for b in bands:
+        key = _zone_key(float(b["band"].split("–")[0]))
+        v = b["median"]
+        left, width = (zero, v / (hi - lo) * 100) if v >= 0 else (zero + v / (hi - lo) * 100, -v / (hi - lo) * 100)
+        lab_pos = f"left:calc({left + width:.2f}% + 6px)" if v >= 0 else f"right:calc({100 - left:.2f}% + 6px)"
+        tip = (f'{b["label"]} (score {b["band"]}): median {pct(v, 0)} one year later; '
+               f'{pct(b["pct_positive"], 0, sign=False)} of {b["days"]:,} days were higher a year later')
+        rows.append(f'''<div class="zr-row" data-tip="{e(tip)}" tabindex="0">
+  <div class="zr-label"><span class="swatch" style="background:{ZONE_COLORS[key]}"></span>{e(b["label"])}<span class="zr-band">{e(b["band"])}</span></div>
+  <div class="zr-track"><span class="zr-zero" style="left:{zero:.2f}%"></span>
+    <span class="zr-bar" style="left:{left:.2f}%;width:{max(width, 0.6):.2f}%;background:{ZONE_COLORS[key]}"></span>
+    <span class="zr-val" style="{lab_pos}">{pct(v, 0)}</span></div>
+  <div class="zr-sub">{pct(b["pct_positive"], 0, sign=False)} of the time higher</div>
+</div>''')
     return "\n".join(rows)
+
+
+def _cycle_exits(cycle):
+    """Group exit triggers by halving cycle: the last one is the exit after the cycle top,
+    earlier ones fired before the top (they sold a slice too early)."""
+    groups = {}
+    for ev in cycle["exit"]["events"]:
+        groups.setdefault(ev["halving"], []).append(ev)
+    out = []
+    for evs in groups.values():
+        final, early = evs[-1], evs[:-1]
+        for x in early:  # how much higher the price went after this early signal
+            x["missed"] = final["high"] / x["price"] - 1
+        out.append((final, early))
+    return out
+
+
+def exit_ladder(cycle) -> str:
+    """One row per past cycle top: how far below the top the exit signal fired vs how far the bear market fell."""
+    h = {x["d"]: x["s"] for x in cycle["history"]}
+    scale = 0.9  # track spans 0% (the top) to -90%
+    rows = []
+    for ev, early in reversed(_cycle_exits(cycle)):
+        if ev["later_low"] is None:
+            continue
+        sig = abs(ev["from_high"]) / scale * 100
+        low = abs(ev["later_low"]) / scale * 100
+        further = ev["low_price"] / ev["price"] - 1
+        st, sb = h.get(ev["high_date"]), h.get(ev["low_date"])
+        chip = lambda label, v: ("" if v is None else
+                                 f'<span class="chip-s"><span class="swatch" style="background:{ZONE_COLORS[_zone_key(v)]}"></span>{label} {v:.0f}</span>')
+        so_far = "" if ev["low_final"] else " so far"
+        early_html = "".join(
+            f'<div class="lad-early">▲ Early signal {fmt_date(x["date"])} at {usd(x["price"])}: the price then rose '
+            f'<strong>{x["missed"] * 100:.0f}%</strong> to the top before the exit above.</div>' for x in early)
+        rows.append(f'''<div class="lad-row">
+  <div class="lad-head"><strong>{datetime.fromisoformat(ev["high_date"]).year} top</strong>
+    <span class="muted">{usd(ev["high"])} · {fmt_date(ev["high_date"])}</span>
+    <span class="lad-chips">{chip("Score at top", st)}{chip("at bottom", sb)}</span></div>
+  <div class="lad-track" role="img" aria-label="Exit signal {pct(ev["from_high"], 0)} from top; bear-market low {pct(ev["later_low"], 0)}{so_far}">
+    <span class="lad-fall" style="width:{low:.2f}%"></span>
+    <span class="lad-saved" style="left:{sig:.2f}%;width:{low - sig:.2f}%"></span>
+    <span class="lad-mark" style="left:{sig:.2f}%"><i></i><b>Exit {pct(ev["from_high"], 0)}</b></span>
+    <span class="lad-low" style="left:{low:.2f}%"><b>Low {pct(ev["later_low"], 0)}{so_far}</b></span>
+  </div>
+  <div class="lad-foot">Signal on {fmt_date(ev["date"])} at {usd(ev["price"])}. The price then fell another <strong>{abs(further) * 100:.0f}%</strong>{so_far}.</div>
+  {early_html}
+</div>''')
+    return "\n".join(rows)
+
+
+def record_summary(cycle) -> str:
+    exits = _cycle_exits(cycle)
+    finals = [abs(f["from_high"]) * 100 for f, _ in exits]
+    n_early = sum(len(e) for _, e in exits)
+    return (f"Low scores have been the best time to buy: every bottom scored under 12. For selling, the exit signal "
+            f"(weekly close below the 50-day MA) got out {min(finals):.0f}–{max(finals):.0f}% below each cycle top and avoided most "
+            f"of the bear market that followed. It also fired {n_early} times before a final top; with each signal selling only a slice, "
+            f"those early sales cost some upside rather than the whole position. Only four cycles exist to test on.")
 
 
 def macro_tiles(macro) -> str:
@@ -270,7 +592,7 @@ def macro_tiles(macro) -> str:
 
 
 # ---------------------------------------------------------------- dashboard
-def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
+def dashboard(cycle, news, brief, macro, spot, generated_at: str, market: dict) -> str:
     overview, items, research = news_items(cycle, news, brief)
     summ = brief_summary(cycle, news, brief, spot)
     z = cycle["zone"]
@@ -279,7 +601,8 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
     today_long = datetime.now().strftime("%A, %-d %B %Y")
     hist = [[x["d"], x["p"], x["s"], x["w"], x["r"], x["m"]] for x in cycle["history"]]
     data_json = json.dumps({"h": hist, "zones": [[u, ZONE_COLORS[k], l] for u, k, l, _ in ZONES],
-                            "exits": [[ev["date"], ev["price"]] for ev in cycle["exit"]["events"]]}).replace("</", "<\\/")
+                            "exits": [[f["date"], f["price"], 1] for f, _ in _cycle_exits(cycle)]
+                                     + [[x["date"], x["price"], 0] for _, ea in _cycle_exits(cycle) for x in ea]}).replace("</", "<\\/")
     ai_note = f'Analysed by {e(brief["model"])}' if brief else "Filtered headlines · add an Anthropic key for analysis"
     failures = "".join(f"<li>{e(f)}</li>" for f in news["failures"])
     above_wma = price / cycle["wma200"] - 1
@@ -295,14 +618,11 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
   </div>
   <div class="hero-grid">
     <div class="h-price">
-      <div class="eyebrow">BTC / USD</div>
-      <div class="price">{usd(price)}</div>
+      <div class="eyebrow">BTC / USD <span class="chart-hint">▤ Tap price for chart</span></div>
+      <div class="price price-btn" data-open-chart="usd" role="button" tabindex="0" aria-label="Open BTC/USD chart"><span data-live="usd">{usd(price)}</span></div>
       <div class="deltas">{delta(cycle["change_1d"])}<span class="dl">24h</span>{delta(cycle["change_30d"])}<span class="dl">30d</span></div>
-      <div class="h-facts">
-        <div><span>All-time high</span><strong>{usd(cycle["ath"]["price"])}</strong><em>{pct(cycle["ath"]["drawdown"], 0)}</em></div>
-        <div><span>200-week MA</span><strong>{usd(cycle["wma200"])}</strong><em>{pct(above_wma, 0)}</em></div>
-        <div><span>Realized price</span><strong>{usd(cycle["realized_price"])}</strong><em>{pct(above_rp, 0)}</em></div>
-      </div>
+      {chf_block(cycle, market.get("chf"))}
+      {facts_table(cycle, price, market)}
       <div class="h-note">{"Live spot via Coinbase" if spot else "Daily close"} · on-chain data to {as_of:%-d %b}</div>
     </div>
     <div class="h-gauge">
@@ -317,6 +637,7 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
       <ul class="tldr">
         <li><span class="ico">◆</span>{e(summ["market"])}</li>
         <li><span class="ico">◆</span>{e(summ["score"])}</li>
+        {f'<li><span class="ico">◆</span>Market mood: {e(market["mood"]["label"])} ({market["mood"]["value"]:.0f}/100). {e(market["interpretation"][0]) if market["interpretation"] else ""}</li>' if market["mood"].get("value") is not None else ""}
       </ul>
       <div class="tldr-sub">In the news</div>
       <ul class="tldr news">{news_bullets}</ul>
@@ -324,14 +645,15 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
   </div>
 </section>
 
-<nav class="tabs"><a href="#brief">Brief</a><a href="#indicators">Indicators</a><a href="#history">History</a><a href="#record">Track record</a></nav>
+<nav class="tabs"><a href="#chart" onclick="event.preventDefault();window.openChart&&openChart('usd')">Chart</a><a href="#mood">Mood</a><a href="#network">Network</a><a href="#brief">Brief</a><a href="#indicators">Indicators</a><a href="#history">History</a><a href="#record">Track record</a></nav>
+
+{mood_section(market)}
 
 <section class="kpis">
   {exit_card(cycle)}
   <div class="kpi"><span class="eyebrow dark">Halving cycle</span><strong>{cycle["halving"]["months_since"]:.0f} months</strong>
     <p>{e(cycle["halving"]["phase"])}</p><em>Next ≈ {fmt_date(cycle["halving"]["next_est"])} · {cycle["halving"]["days_to_next"]} days</em></div>
-  <div class="kpi"><span class="eyebrow dark">Network security</span><strong>{pct(cycle["hashrate_change_30d"])}</strong>
-    <p>Hashrate change over 30 days. Rising hashrate means miners keep investing in the network.</p><em>Source: Coin Metrics</em></div>
+  {mining_card(cycle)}
 </section>
 
 <div class="cols" id="brief">
@@ -369,7 +691,7 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
     <div class="ranges" role="group" aria-label="Time range">
       <button data-r="all">Since 2014</button><button data-r="4y" class="on">4 years</button><button data-r="1y">1 year</button>
     </div></div>
-  <p class="note small">Both charts share one time axis; hover either to read the same date on both. Dashed lines mark past exit signals.</p>
+  <p class="note small">Both charts share one time axis; hover either to read the same date on both. Dashed lines mark past exit signals (fainter = early signal before the final top).</p>
   <h3 class="chart-title">Cycle score</h3>
   <div class="chart" id="c-score"></div>
   <div class="chart-head"><h3 class="chart-title">Price, exit line and long-run anchors <span class="meta-note">log scale</span></h3>
@@ -378,32 +700,20 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
 </section>
 
 <section class="panel" id="record">
-  <div class="phead"><h2>Track record</h2><span class="meta-note">How much to trust the score</span></div>
-  <div class="cols even">
+  <div class="phead"><h2>Track record</h2><span class="meta-note">Since 2014 · how far to trust each signal</span></div>
+  <div class="cols even record">
     <div>
-      <h3>Price one year later, by score band <span class="meta-note">2014–{cycle["as_of"][:4]}</span></h3>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Score band</th><th class="num">Days</th><th class="num">Median 1-yr</th><th class="num">% positive</th></tr></thead>
-        <tbody>{backtest_rows(cycle)}</tbody>
-      </table></div>
+      <h3>Buying: price one year after each score zone</h3>
+      <p class="note small">Median change in BTC price 12 months later. Hover a bar for details.</p>
+      <div class="zr">{zone_return_chart(cycle)}</div>
     </div>
     <div>
-      <h3>Score at past turning points</h3>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Date</th><th>Event</th><th class="num">Price</th><th class="num">Score</th></tr></thead>
-        <tbody>{past_turns(cycle)}</tbody>
-      </table></div>
+      <h3>Selling: exit signal at past cycle tops</h3>
+      <p class="note small">Track runs from the top (0%) to −90%. <span class="key k-saved"></span> drop the exit signal avoided.</p>
+      <div class="ladder">{exit_ladder(cycle)}</div>
     </div>
   </div>
-  <h3>Exit signal at past tops <span class="meta-note">rule applied day by day, no hindsight</span></h3>
-  <div class="table-wrap"><table>
-    <thead><tr><th>Cycle top</th><th>Exit signal</th><th class="num">From top</th><th class="num">Bear low from top</th></tr></thead>
-    <tbody>{past_exits(cycle)}</tbody>
-  </table></div>
-  <div class="callout"><strong>Honest read.</strong> The score has reliably flagged cycle <em>bottoms</em> (all three scored below 5).
-  It flagged the 2017 top clearly, but the 2021 and 2025 tops were less extreme on these metrics, so the score stayed
-  neutral. That is why selling uses the separate exit signal: it caught the slow 2021 and 2025 tops 27% and 13%
-  below the peak, while the score caught the 2017 spike. Neither picks the exact top, and only four cycles exist to test on.</div>
+  <div class="callout"><strong>In short.</strong> {e(record_summary(cycle))}</div>
 </section>
 
 <footer>
@@ -416,7 +726,12 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
   <p>Generated {e(generated_at)}. This page applies fixed, published rules to public data. It is not personalised financial advice.</p>
 </footer>
 '''
-    return PAGE.replace("{{BODY}}", body).replace("{{DATA}}", data_json)
+    css, modal_html, script = chart_view.assets(market.get("ta"))
+    w_head, w_css, w_html, w_js = webapp_view.assets(datetime.now().astimezone().isoformat())
+    return (PAGE.replace("{{BODY}}", body + modal_html).replace("{{DATA}}", data_json)
+            .replace("/*{{CHART_CSS}}*/", css).replace("<!--{{CHART_JS}}-->", script)
+            .replace("<!--{{WEBAPP_HEAD}}-->", w_head).replace("/*{{WEBAPP_CSS}}*/", w_css)
+            .replace("</main>", "</main>" + w_html, 1).replace("<!--{{WEBAPP_JS}}-->", w_js))
 
 
 PAGE = r'''<!doctype html>
@@ -425,21 +740,23 @@ PAGE = r'''<!doctype html>
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="BTC Daily"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0e0f11"><meta name="robots" content="noindex">
+<!--{{WEBAPP_HEAD}}-->
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root{color-scheme:light;--page:#f4f3ef;--surface:#ffffff;--surface2:#faf9f6;--ink:#0d0d0e;--ink2:#4e4d49;--muted:#8b8982;
 --grid:#ebe9e3;--axis:#cfcdc5;--ring:rgba(13,13,14,.08);--shadow:0 1px 2px rgba(16,17,19,.04),0 10px 30px -12px rgba(16,17,19,.10);
---s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--wash:rgba(13,13,14,.035);--bandop:.16;--up:#0b7a2e;--down:#c23b3b;--btc:#f7931a}
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--wash:rgba(13,13,14,.035);--pattern:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='260' height='260' viewBox='0 0 260 260'%3E%3Cg fill='none' stroke='%23b8650a' stroke-opacity='0.10' stroke-width='1.3'%3E%3Crect x='16' y='34' width='36' height='26' rx='6'/%3E%3Crect x='84' y='34' width='36' height='26' rx='6'/%3E%3Cpath d='M52 47h32'/%3E%3Cpath d='M120 47h22'/%3E%3Ccircle cx='146' cy='47' r='2.5'/%3E%3Crect x='150' y='176' width='36' height='26' rx='6'/%3E%3Crect x='218' y='176' width='36' height='26' rx='6'/%3E%3Cpath d='M186 189h32'/%3E%3Cpath d='M150 189h-22'/%3E%3Ccircle cx='124' cy='189' r='2.5'/%3E%3C/g%3E%3Cg fill='%23b8650a' fill-opacity='0.07' font-family='Helvetica,Arial,sans-serif' font-weight='700'%3E%3Ctext x='182' y='104' font-size='38' transform='rotate(-12 192 92)'%3E%E2%82%BF%3C/text%3E%3Ctext x='40' y='226' font-size='24' transform='rotate(10 48 218)'%3E%E2%82%BF%3C/text%3E%3C/g%3E%3C/svg%3E");--bandop:.16;--up:#0b7a2e;--down:#c23b3b;--btc:#f7931a}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--page:#0a0a0b;--surface:#151517;--surface2:#1b1b1e;--ink:#f2f1ed;
 --ink2:#c3c2b9;--muted:#8d8b84;--grid:#26262a;--axis:#36363b;--ring:rgba(255,255,255,.08);--shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px -12px rgba(0,0,0,.5);
---s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--wash:rgba(255,255,255,.045);--bandop:.22;--up:#2fbf5b;--down:#ec6b6b}}
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--wash:rgba(255,255,255,.045);--pattern:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='260' height='260' viewBox='0 0 260 260'%3E%3Cg fill='none' stroke='%23f7931a' stroke-opacity='0.09' stroke-width='1.3'%3E%3Crect x='16' y='34' width='36' height='26' rx='6'/%3E%3Crect x='84' y='34' width='36' height='26' rx='6'/%3E%3Cpath d='M52 47h32'/%3E%3Cpath d='M120 47h22'/%3E%3Ccircle cx='146' cy='47' r='2.5'/%3E%3Crect x='150' y='176' width='36' height='26' rx='6'/%3E%3Crect x='218' y='176' width='36' height='26' rx='6'/%3E%3Cpath d='M186 189h32'/%3E%3Cpath d='M150 189h-22'/%3E%3Ccircle cx='124' cy='189' r='2.5'/%3E%3C/g%3E%3Cg fill='%23f7931a' fill-opacity='0.07' font-family='Helvetica,Arial,sans-serif' font-weight='700'%3E%3Ctext x='182' y='104' font-size='38' transform='rotate(-12 192 92)'%3E%E2%82%BF%3C/text%3E%3Ctext x='40' y='226' font-size='24' transform='rotate(10 48 218)'%3E%E2%82%BF%3C/text%3E%3C/g%3E%3C/svg%3E");--bandop:.22;--up:#2fbf5b;--down:#ec6b6b}}
 :root[data-theme="dark"]{color-scheme:dark;--page:#0a0a0b;--surface:#151517;--surface2:#1b1b1e;--ink:#f2f1ed;--ink2:#c3c2b9;--muted:#8d8b84;
 --grid:#26262a;--axis:#36363b;--ring:rgba(255,255,255,.08);--shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px -12px rgba(0,0,0,.5);
---s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--wash:rgba(255,255,255,.045);--bandop:.22;--up:#2fbf5b;--down:#ec6b6b}
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--wash:rgba(255,255,255,.045);--pattern:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='260' height='260' viewBox='0 0 260 260'%3E%3Cg fill='none' stroke='%23f7931a' stroke-opacity='0.09' stroke-width='1.3'%3E%3Crect x='16' y='34' width='36' height='26' rx='6'/%3E%3Crect x='84' y='34' width='36' height='26' rx='6'/%3E%3Cpath d='M52 47h32'/%3E%3Cpath d='M120 47h22'/%3E%3Ccircle cx='146' cy='47' r='2.5'/%3E%3Crect x='150' y='176' width='36' height='26' rx='6'/%3E%3Crect x='218' y='176' width='36' height='26' rx='6'/%3E%3Cpath d='M186 189h32'/%3E%3Cpath d='M150 189h-22'/%3E%3Ccircle cx='124' cy='189' r='2.5'/%3E%3C/g%3E%3Cg fill='%23f7931a' fill-opacity='0.07' font-family='Helvetica,Arial,sans-serif' font-weight='700'%3E%3Ctext x='182' y='104' font-size='38' transform='rotate(-12 192 92)'%3E%E2%82%BF%3C/text%3E%3Ctext x='40' y='226' font-size='24' transform='rotate(10 48 218)'%3E%E2%82%BF%3C/text%3E%3C/g%3E%3C/svg%3E");--bandop:.22;--up:#2fbf5b;--down:#ec6b6b}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
-body{margin:0;background:var(--page);color:var(--ink);font:15px/1.55 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;
+body{margin:0;background-color:var(--page);background-image:radial-gradient(1100px 600px at 100% 0%,rgba(247,147,26,.10),transparent 60%),
+ radial-gradient(900px 600px at 0% 100%,rgba(57,135,229,.07),transparent 60%),var(--pattern);background-attachment:fixed,fixed,scroll;color:var(--ink);font:15px/1.55 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;
 -webkit-font-smoothing:antialiased;font-feature-settings:"cv11","ss01";padding:20px 16px 56px}
 main{max-width:1200px;margin:0 auto;display:flex;flex-direction:column;gap:18px}
 h2{font-size:18px;font-weight:700;letter-spacing:-.01em;margin:0}h3{font-size:15px;font-weight:600;margin:14px 0 8px}
@@ -452,6 +769,12 @@ p{margin:6px 0}.muted{color:var(--muted)}.small{font-size:13px}code{font-size:12
 .hero{background:radial-gradient(900px 380px at 88% -20%,rgba(247,147,26,.20),transparent 60%),
  radial-gradient(700px 300px at 0% 120%,rgba(57,135,229,.16),transparent 60%),linear-gradient(180deg,#16171a,#0e0f11);
  color:#f3f2ee;border-radius:22px;padding:22px 26px 26px;box-shadow:0 20px 50px -24px rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.06)}
+.hero{position:relative;overflow:hidden}.hero>*{position:relative;z-index:1}
+.hero::after{content:"₿";position:absolute;right:-40px;top:-90px;font-size:400px;font-weight:800;line-height:1;color:rgba(247,147,26,.07);
+ transform:rotate(-14deg);pointer-events:none;z-index:0}
+.hero::before{content:"";position:absolute;left:0;right:0;bottom:0;height:70px;z-index:0;pointer-events:none;opacity:.5;
+ background:repeating-linear-gradient(90deg,transparent 0 22px,rgba(247,147,26,.16) 22px 58px,transparent 58px 62px,rgba(247,147,26,.16) 62px 64px,transparent 64px 84px);
+ -webkit-mask:linear-gradient(transparent 40%,#000 41%,#000 59%,transparent 60%);mask:linear-gradient(transparent 40%,#000 41%,#000 59%,transparent 60%)}
 .mast{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding-bottom:18px;border-bottom:1px solid rgba(255,255,255,.08)}
 .brand{display:flex;align-items:center;gap:12px}
 .mark{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;font-weight:800;font-size:20px;color:#1a1206;
@@ -465,9 +788,25 @@ p{margin:6px 0}.muted{color:var(--muted)}.small{font-size:13px}code{font-size:12
 .delta{font-size:13px;font-weight:600;border-radius:999px;padding:3px 9px;font-variant-numeric:tabular-nums}
 .hero .delta.up{color:#4ade80;background:rgba(74,222,128,.12)}.hero .delta.down{color:#f87171;background:rgba(248,113,113,.12)}
 .delta.up{color:var(--up);background:var(--wash)}.delta.down{color:var(--down);background:var(--wash)}
+.h-facts2{width:100%;margin-top:14px;border-collapse:collapse;font-size:14px}
+.h-facts2 th,.h-facts2 td{padding:8px 0;border-top:1px solid rgba(255,255,255,.07);text-align:right;vertical-align:baseline}
+.h-facts2 tr:first-child th{border-top:0;padding:0 0 4px;font-size:11px;font-weight:600;letter-spacing:.1em;color:#7d7b74}
+.h-facts2 th{border-bottom:0;text-transform:none}
+.h-facts2 th[scope=row]{text-align:left;font-weight:400;color:#a9a79f;padding-right:8px;font-size:14px;letter-spacing:0}
+.h-facts2 td{padding-left:14px;white-space:nowrap}
+.h-facts2 strong{font-weight:600;font-variant-numeric:tabular-nums}
+.h-facts2 em{display:block;font-style:normal;color:#9c9a92;font-size:11.5px;font-variant-numeric:tabular-nums}
 .h-facts{margin-top:18px;display:flex;flex-direction:column}
 .h-facts>div{display:grid;grid-template-columns:1fr auto 52px;gap:10px;padding:8px 0;border-top:1px solid rgba(255,255,255,.07);font-size:14px;align-items:baseline}
 .h-facts span{color:#a9a79f}.h-facts strong{font-weight:600;font-variant-numeric:tabular-nums}.h-facts em{font-style:normal;color:#9c9a92;font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+.chf{margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,.07)}
+.chf-price{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:22px;font-weight:650;font-variant-numeric:tabular-nums}
+.chf-price .cur{font-size:12px;font-weight:600;letter-spacing:.08em;color:#9c9a92}
+.fx{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:13px;color:#b9b7af;margin-top:6px;font-variant-numeric:tabular-nums}
+.fx b{color:#f3f2ee;font-weight:600;margin-right:4px}
+.fxchg{font-size:12px;font-weight:600;border-radius:999px;padding:2px 8px}
+.fxchg.up{color:#4ade80;background:rgba(74,222,128,.12)}.fxchg.down{color:#f87171;background:rgba(248,113,113,.12)}
+.fx-note{font-size:11.5px;color:#7d7b74;margin-top:4px}
 .h-note{font-size:12px;color:#7d7b74;margin-top:10px}
 .h-gauge{text-align:center;display:flex;flex-direction:column;align-items:center}
 .gauge{width:100%;max-width:280px;margin-top:6px}.gauge .g-num{font-size:54px;font-weight:700;fill:#f3f2ee;letter-spacing:-.03em}
@@ -488,7 +827,22 @@ p{margin:6px 0}.muted{color:var(--muted)}.small{font-size:13px}code{font-size:12
  border:1px solid var(--ring);border-radius:999px;padding:5px;box-shadow:var(--shadow)}
 .tabs a{font-size:13px;font-weight:500;color:var(--ink2);padding:6px 14px;border-radius:999px}.tabs a:hover{background:var(--wash);text-decoration:none;color:var(--ink)}
 
-.kpis{display:grid;grid-template-columns:2fr 1fr 1fr;gap:18px}
+.kpis{display:grid;grid-template-columns:2fr 1fr;gap:18px}
+.mining-card{grid-column:1/-1;scroll-margin-top:64px}
+#mood{scroll-margin-top:64px}
+.mine-grid{display:grid;grid-template-columns:1fr 1.3fr;gap:28px;margin:8px 0 6px}
+.mstat{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}.mstat strong{font-size:28px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.mstat span{font-size:12.5px;color:var(--muted)}
+.cost-scale{position:relative;height:12px;margin:34px 0 30px;border-radius:6px;background:var(--wash)}
+.cs-range{position:absolute;top:0;bottom:0;border-radius:6px;background:color-mix(in srgb,var(--btc) 30%,transparent)}
+.cs-tick{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--ink2)}
+.cs-tick b{position:absolute;top:22px;left:50%;transform:translateX(-50%);font-size:11.5px;font-weight:600;white-space:nowrap;color:var(--ink2)}
+.cs-tick.allin{background:var(--down)}.cs-tick.allin b{color:var(--down)}
+.cs-price{position:absolute;top:-6px;bottom:-6px;width:4px;margin-left:-2px;border-radius:2px;background:var(--ink);box-shadow:0 0 0 2px var(--surface)}
+.cs-price b{position:absolute;bottom:26px;left:50%;transform:translateX(-50%);font-size:12px;white-space:nowrap}
+.cs-legend{font-size:11.5px;color:var(--muted)}.cs-legend .k{display:inline-block;width:14px;height:8px;border-radius:3px;margin-right:6px;vertical-align:0}
+.cs-legend .k.range{background:color-mix(in srgb,var(--btc) 30%,transparent)}
+.zchip{font-size:11px;font-weight:700;border-radius:6px;padding:1px 7px;margin-right:4px;background:var(--wash)}.zchip.warn{color:var(--btc)}
 .exit-status{display:flex;align-items:center;gap:10px;margin:6px 0 2px}.exit-status strong{font-size:20px;letter-spacing:-.01em}
 .exit-icon{font-size:20px;line-height:1}.ex-fired .exit-icon,.ex-armed .exit-icon{color:var(--down)}.ex-closed .exit-icon{color:var(--muted)}.ex-watch .exit-icon{color:var(--btc)}
 .ex-fired,.ex-armed{border-color:color-mix(in srgb,var(--down) 45%,transparent)}
@@ -542,6 +896,89 @@ th{text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
 td{border-bottom:1px solid var(--grid);padding:10px 8px;vertical-align:top}tbody tr:hover{background:var(--wash)}
 .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .swatch{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:8px;vertical-align:-1px}
+.record h3{margin-top:4px}
+.zr{display:flex;flex-direction:column;gap:14px;margin-top:12px}
+.zr-row{position:relative;display:grid;grid-template-columns:170px 1fr;column-gap:12px;align-items:center;outline:none}
+.zr-label{font-size:13.5px;font-weight:500;display:flex;align-items:center;flex-wrap:wrap}.zr-band{font-size:11px;color:var(--muted);margin-left:6px;font-variant-numeric:tabular-nums}
+.zr-track{position:relative;height:22px}
+.zr-zero{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--axis)}
+.zr-bar{position:absolute;top:3px;height:16px;border-radius:4px}
+.zr-val{position:absolute;top:2px;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.zr-sub{grid-column:2;font-size:11.5px;color:var(--muted);margin-top:1px}
+.zr-row:hover .zr-bar,.zr-row:focus .zr-bar{filter:brightness(1.08)}
+[data-tip]:hover::after,[data-tip]:focus::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 6px);z-index:3;max-width:320px;
+ background:var(--surface);border:1px solid var(--ring);border-radius:10px;padding:8px 11px;font-size:12px;line-height:1.45;color:var(--ink);box-shadow:0 8px 24px rgba(0,0,0,.16)}
+.ladder{display:flex;flex-direction:column;gap:18px;margin-top:12px}
+.lad-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:13.5px}
+.lad-chips{margin-left:auto;display:flex;gap:6px}.chip-s{font-size:11.5px;color:var(--ink2);border:1px solid var(--ring);border-radius:999px;padding:1px 8px;background:var(--surface2);white-space:nowrap}
+.lad-track{position:relative;height:30px;margin:26px 0 6px;border-radius:6px;background:var(--wash)}
+.lad-fall{position:absolute;left:0;top:0;bottom:0;border-radius:6px 0 0 6px;background:color-mix(in srgb,var(--down) 18%,transparent)}
+.lad-saved,.k-saved{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--down) 55%,transparent) 0 3px,transparent 3px 7px)}
+.lad-saved{position:absolute;top:0;bottom:0}
+.k-saved{display:inline-block;width:14px;height:10px;border-radius:2px;vertical-align:-1px;border:1px solid color-mix(in srgb,var(--down) 55%,transparent)}
+.lad-mark{position:absolute;top:-24px;bottom:0;transform:translateX(-1px)}
+.lad-mark i{position:absolute;left:0;top:20px;bottom:0;width:3px;border-radius:2px;background:var(--ink)}
+.lad-mark b{position:absolute;left:-2px;top:0;font-size:12px;white-space:nowrap}
+.lad-low{position:absolute;top:0;bottom:0;border-left:2px solid var(--down)}
+.lad-low b{position:absolute;right:6px;top:7px;font-size:12px;white-space:nowrap;color:var(--ink)}
+.lad-foot{font-size:12.5px;color:var(--ink2)}
+.lad-early{font-size:12.5px;color:var(--ink2);margin-top:6px;padding:6px 10px;border-radius:8px;background:var(--surface2);border:1px dashed var(--ring)}
+.sub{margin:22px 0 10px;font-size:15px}
+.mood-head{display:flex;align-items:center;gap:14px}.mood-num{font-size:48px;font-weight:700;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.mood-label{display:flex;align-items:center;gap:8px;font-size:18px;font-weight:650}.mood-label span{width:12px;height:12px;border-radius:50%}
+.mscale{position:relative;display:flex;gap:2px;height:10px;margin:14px 0 4px}.mscale span{border-radius:3px}
+.mscale i{position:absolute;top:-5px;width:4px;height:20px;margin-left:-2px;background:var(--ink);border-radius:2px;box-shadow:0 0 0 2px var(--surface)}
+.mscale-labels{display:flex;font-size:10.5px;color:var(--muted)}.mscale-labels span{text-align:center}
+.mparts{margin-top:14px;display:flex;flex-direction:column;gap:10px}
+.mp-top{display:flex;justify-content:space-between;gap:10px;font-size:13.5px}.mp-detail{color:var(--ink2);font-variant-numeric:tabular-nums}
+.mp-bar{position:relative;height:6px;border-radius:3px;background:linear-gradient(90deg,#2f6fd0,#7fb2f0,#a9a8a0,#ee9e9d,#e34948);opacity:.35;margin-top:5px}
+.mp-bar span{position:absolute;top:-3px;width:12px;height:12px;margin-left:-6px;border-radius:50%;border:2px solid var(--surface);opacity:1}
+.mparts .mp-bar{opacity:1;background:var(--wash)}
+.read{background:var(--surface2);border:1px solid var(--ring);border-radius:14px;padding:14px 18px}
+.read-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}.read h3{margin:0}
+.ai-tag{font-size:11px;color:var(--muted);border:1px solid var(--ring);border-radius:999px;padding:2px 8px}
+.read ul{margin:10px 0 6px;padding-left:18px}.read li{margin:6px 0;font-size:14.5px}
+.flow-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.fcard.wide{grid-column:1/-1}
+.holders summary{list-style:none;cursor:pointer;display:flex;flex-direction:column;gap:10px;outline:none}
+.holders summary::-webkit-details-marker{display:none}
+.h-sum-top{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.h-toggle{font-size:13px;font-weight:600;color:var(--s1);white-space:nowrap}.h-toggle .t-close{display:none}
+.holders[open] .h-toggle .t-open{display:none}.holders[open] .h-toggle .t-close{display:inline}
+.holders summary:hover .h-toggle,.holders summary:focus-visible .h-toggle{text-decoration:underline}
+.holders[open] summary{margin-bottom:6px}
+.hchips{display:flex;flex-wrap:wrap;gap:8px}.hchip{font-size:12.5px;border:1px solid var(--ring);border-radius:999px;padding:3px 10px;background:var(--surface);font-variant-numeric:tabular-nums}
+.tr-table tr.extra{display:none}.tr-table.show-all tr.extra{display:table-row}
+.more-btn{font:inherit;font-size:12.5px;font-weight:600;color:var(--s1);background:none;border:0;padding:4px 0;cursor:pointer}
+.tr-table tr.grp td{padding-top:14px;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink2);border-bottom:1px solid var(--axis)}
+.tr-table tr.grp td span{float:right;font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted)}
+.pctcell{display:flex;align-items:center;justify-content:flex-end;gap:8px}
+.pbar{display:inline-block;width:90px;height:6px;border-radius:3px;background:var(--wash);overflow:hidden}.pbar i{display:block;height:100%;background:var(--btc);border-radius:3px}
+.est{position:relative;font-size:10.5px;font-weight:600;color:var(--muted);border:1px dashed var(--ring);border-radius:5px;padding:0 5px;margin-left:4px;cursor:help;outline:none}
+.fcard{border:1px solid var(--ring);border-radius:14px;padding:16px;background:var(--surface2);display:flex;flex-direction:column;gap:6px;min-width:0}
+.fcard em{font-style:normal;font-size:11.5px;color:var(--muted);margin-top:auto;padding-top:6px}
+.fbig{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}.fbig strong{font-size:24px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.fbig span{font-size:12.5px;color:var(--muted)}
+.pos{color:var(--s1)}.neg{color:var(--down)}
+.etf-cols{display:flex;gap:3px;height:110px;margin-top:8px;position:relative}
+.ec{position:relative;flex:1;display:grid;grid-template-rows:1fr 1fr 14px;outline:none}
+.ec-up{display:flex;align-items:flex-end;border-bottom:1px solid var(--axis)}.ec-dn{display:flex;align-items:flex-start}
+.ec-bar{display:block;width:100%;border-radius:3px}.ec-bar.in{background:var(--s1)}.ec-bar.out{background:var(--down)}
+.ec:hover .ec-bar,.ec:focus .ec-bar{filter:brightness(1.15)}
+.ec-lab{font-size:9.5px;color:var(--muted);white-space:nowrap;text-align:center}
+.ec[data-tip]:hover::after,.ec[data-tip]:focus::after{left:50%;transform:translateX(-50%);top:auto;bottom:calc(100% + 4px);width:max-content;max-width:240px}
+.ec-key{font-size:11.5px;color:var(--muted)}.ec-key .k{display:inline-block;width:9px;height:9px;border-radius:2px;margin:0 4px 0 6px;vertical-align:-1px}
+.ec-key .k.in{background:var(--s1)}.ec-key .k.out{background:var(--down)}
+.movers{margin-top:6px}.mover{display:flex;justify-content:space-between;font-size:13.5px;padding:4px 0;border-top:1px solid var(--grid);font-variant-numeric:tabular-nums}
+.spark{width:100%;height:44px;margin:6px 0}
+.kv2{display:flex;justify-content:space-between;font-size:13.5px;padding:3px 0;border-top:1px solid var(--grid);font-variant-numeric:tabular-nums}
+.tr-table{font-size:13px}.tr-table td,.tr-table th{padding:5px 4px}
+.tone{font-size:11px;font-weight:700;border-radius:6px;padding:2px 8px}
+.t-bull{color:var(--s1);background:color-mix(in srgb,var(--s1) 12%,transparent)}.t-bear{color:var(--down);background:color-mix(in srgb,var(--down) 12%,transparent)}
+.t-neu{color:var(--ink2);background:var(--wash)}
+.agenda{list-style:none;margin:8px 0 0;padding:8px 12px;border-radius:10px;background:var(--surface2);border:1px solid var(--ring);font-size:12.5px;color:var(--ink2)}
+.agenda li{margin:2px 0;padding-left:14px;position:relative}.agenda li:not(.ag-h)::before{content:"›";position:absolute;left:2px;color:var(--muted)}
+.agenda .ag-h{padding:0;font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .callout{margin-top:16px;padding:14px 16px;border-radius:12px;background:var(--surface2);border:1px solid var(--ring);border-left:3px solid var(--btc);font-size:14px;color:var(--ink2)}
 .callout strong{color:var(--ink)}
 .ranges{display:flex;gap:2px;background:var(--wash);border-radius:10px;padding:3px}
@@ -554,11 +991,14 @@ td{border-bottom:1px solid var(--grid);padding:10px 8px;vertical-align:top}tbody
  box-shadow:0 8px 24px rgba(0,0,0,.16);white-space:nowrap;display:none;z-index:2}.tip b{font-weight:600}.tip .r{display:flex;justify-content:space-between;gap:16px}
 footer{padding:4px 6px;font-size:12.5px;color:var(--muted)}footer p{margin:6px 0}footer strong{color:var(--ink2)}
 @media (max-width:1020px){.hero-grid{grid-template-columns:1fr 1fr}.h-summary{grid-column:1/-1}.ind-grid{grid-template-columns:1fr 1fr}}
-@media (max-width:1020px){.kpis{grid-template-columns:1fr 1fr}.exit-card{grid-column:1/-1}}
+@media (max-width:1020px){.kpis{grid-template-columns:1fr 1fr}.exit-card{grid-column:1/-1}.mine-grid{grid-template-columns:1fr}}
+@media (max-width:700px){.flow-grid{grid-template-columns:1fr}.pbar{width:40px}}
 @media (max-width:860px){.cols,.cols.even{grid-template-columns:1fr}}
-@media (max-width:600px){.kpis{grid-template-columns:1fr}}
+@media (max-width:600px){.tabs{max-width:100%;overflow-x:auto;scrollbar-width:none}.tabs::-webkit-scrollbar{display:none}.hero::after{font-size:240px;right:-30px;top:-40px;color:rgba(247,147,26,.06)}.tabs{flex-wrap:nowrap;gap:2px}.tabs a{padding:6px 9px;font-size:12.5px;white-space:nowrap}.kpis{grid-template-columns:1fr}.zr-row{grid-template-columns:1fr}.zr-sub{grid-column:1}.lad-chips{margin-left:0}}
 @media (max-width:600px){.hero{padding:18px}.hero-grid{grid-template-columns:1fr;gap:22px}.price{font-size:44px}
  .views{grid-template-columns:1fr}.ind-grid{grid-template-columns:1fr}.panel{padding:18px}.chip{display:none}}
+/*{{CHART_CSS}}*/
+/*{{WEBAPP_CSS}}*/
 </style></head><body><main>
 {{BODY}}
 </main>
@@ -566,7 +1006,7 @@ footer{padding:4px 6px;font-size:12.5px;color:var(--muted)}footer p{margin:6px 0
 const D={{DATA}};
 const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const rows=D.h.map(r=>({t:Date.parse(r[0]),d:r[0],p:r[1],s:r[2],w:r[3],r:r[4],m:r[5]}));
-const exits=D.exits.map(x=>({t:Date.parse(x[0]),p:x[1]}));
+const exits=D.exits.map(x=>({t:Date.parse(x[0]),p:x[1],final:!!x[2]}));
 const fmtUsd=v=>v==null?'–':'$'+Math.round(v).toLocaleString('en-US');
 const fmtK=v=>v>=1000?'$'+(v/1000).toFixed(v>=1e5?0:1)+'k':'$'+Math.round(v);
 const fmtDate=t=>new Date(t).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'});
@@ -604,9 +1044,9 @@ function chart(id,cfg){
   el('line',{x1:m.l,x2:W-m.r,y1:H-m.b,y2:H-m.b,stroke:css('--axis')},svg);
   // past exit signals: same dashed line on every chart
   for(const ex of exits){if(ex.t<x0||ex.t>x1)continue;const x=X(ex.t);
-    el('line',{x1:x,x2:x,y1:m.t,y2:H-m.b,stroke:css('--down'),'stroke-dasharray':'4 3','stroke-width':1.5},svg);
-    const lb=el('text',{x:x+4,y:m.t+2,'font-size':10,'font-weight':600,fill:css('--ink2')},svg);lb.textContent='Exit signal';
-    if(cfg.log)el('path',{d:`M${x-5} ${Y(ex.p)-11}L${x+5} ${Y(ex.p)-11}L${x} ${Y(ex.p)-3}Z`,fill:css('--down')},svg)}
+    el('line',{x1:x,x2:x,y1:m.t,y2:H-m.b,stroke:css('--down'),'stroke-dasharray':ex.final?'4 3':'2 4','stroke-width':ex.final?1.5:1,'stroke-opacity':ex.final?1:.55},svg);
+    if(ex.final){const lb=el('text',{x:x+4,y:m.t+2,'font-size':10,'font-weight':600,fill:css('--ink2')},svg);lb.textContent='Exit signal'}
+    if(cfg.log)el('path',{d:`M${x-5} ${Y(ex.p)-11}L${x+5} ${Y(ex.p)-11}L${x} ${Y(ex.p)-3}Z`,fill:css('--down'),'fill-opacity':ex.final?1:.5},svg)}
   for(const s of cfg.series){let d='',pen=false;for(const r of data){const v=r[s.k];if(v==null){pen=false;continue}d+=(pen?'L':'M')+X(r.t).toFixed(1)+' '+Y(v).toFixed(1);pen=true}
     el('path',{d,fill:'none',stroke:css(s.c),'stroke-width':s.w||2,'stroke-linejoin':'round','stroke-linecap':'round'},svg)}
   // direct end labels in the right gutter (de-overlapped)
@@ -636,13 +1076,13 @@ function chart(id,cfg){
   hit.addEventListener('mouseleave',()=>charts.forEach(c=>c.hide()));
   return {show,hide};
 }
-const priceSeries=[{k:'p',label:'BTC price',short:'BTC',c:'--s1',f:fmtUsd},{k:'m',label:'20-week MA (exit line)',short:'20W',c:'--s4',f:fmtUsd,w:1.75},
+const priceSeries=[{k:'p',label:'BTC price',short:'BTC',c:'--s1',f:fmtUsd},{k:'m',label:'50-day MA (exit line)',short:'50D',c:'--s4',f:fmtUsd,w:1.75},
   {k:'w',label:'200-week MA',short:'200W',c:'--s2',f:fmtUsd},{k:'r',label:'Realized price',short:'Realized',c:'--s3',f:fmtUsd}];
 function legend(){document.getElementById('lg-price').innerHTML=priceSeries.map(s=>'<span><i style="background:'+css(s.c)+'"></i>'+s.label+'</span>').join('')}
 function draw(){
   charts.length=0;
   charts.push(chart('c-score',{series:[{k:'s',label:'Cycle score',c:'--ink',f:v=>v.toFixed(0)}],bands:true,aria:'Cycle score over time with zone bands'}));
-  charts.push(chart('c-price',{series:priceSeries,log:true,endLabels:true,aria:'BTC price, 20-week, 200-week moving averages and realized price, log scale'}));
+  charts.push(chart('c-price',{series:priceSeries,log:true,endLabels:true,aria:'BTC price, 50-day and 200-week moving averages and realized price, log scale'}));
   legend();
 }
 document.querySelectorAll('.ranges button').forEach(b=>b.addEventListener('click',()=>{range=b.dataset.r;
@@ -651,11 +1091,14 @@ let rt;addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(draw,120)})
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',draw);
 document.fonts&&document.fonts.ready.then(draw);
 draw();
-</script></body></html>'''
+</script>
+<!--{{CHART_JS}}-->
+<!--{{WEBAPP_JS}}-->
+</body></html>'''
 
 
 # ---------------------------------------------------------------- email
-def email_html(cycle, news, brief, spot) -> str:
+def email_html(cycle, news, brief, spot, market=None) -> str:
     """Table-based, inline-styled HTML that renders in Gmail/Outlook/Apple Mail (no scripts, no SVG)."""
     overview, items, research = news_items(cycle, news, brief)
     summ = brief_summary(cycle, news, brief, spot)
@@ -673,6 +1116,9 @@ def email_html(cycle, news, brief, spot) -> str:
     bullet = lambda t, c="#f7931a": (f'<tr><td width="18" valign="top" style="color:{c};font-size:9px;padding-top:6px">◆</td>'
                                      f'<td style="font-size:14px;line-height:1.5;color:#2b2a27;padding-bottom:8px">{e(t)}</td></tr>')
     tldr = (bullet(summ["market"]) + bullet(summ["score"]) + bullet(f'Exit signal: {cycle["exit"]["label"]}. {cycle["exit"]["detail"]}', "#c23b3b")
+            + (bullet(f'Market mood: {market["mood"]["label"]} ({market["mood"]["value"]:.0f}/100). '
+                      + (market["interpretation"][0] if market["interpretation"] else ""), "#2f6fd0")
+               if market and market["mood"].get("value") is not None else "")
             + "".join(bullet(p, "#a9a8a0") for p in summ["news"]))
 
     stories = ""

@@ -5,6 +5,8 @@ Every indicator is mapped to a 0-100 sub-score with fixed, explainable breakpoin
 All history values are computed without look-ahead, so the backtest table is honest.
 """
 import math
+
+import mining
 from datetime import date
 
 HALVINGS = [date(2012, 11, 28), date(2016, 7, 9), date(2020, 5, 11), date(2024, 4, 20)]
@@ -120,16 +122,11 @@ def compute(rows: list[dict]) -> dict:
     iss365 = sma(iss, 365)
     rsi_w = weekly_rsi_by_day(dates, price)
 
-    # completed weekly closes and their 20-week moving average (the exit "trend line")
+    # exit "trend line": 50-day moving average, checked on completed weekly closes
     keys = [date.fromisoformat(d).isocalendar()[:2] for d in dates]
     wk_idx = [i for i in range(len(dates) - 1) if keys[i + 1] != keys[i]]
-    w20 = sma([price[i] for i in wk_idx], 20)
-    ma20w_daily, j = [], -1
-    for i in range(len(dates)):
-        while j + 1 < len(wk_idx) and wk_idx[j + 1] <= i:
-            j += 1
-        ma20w_daily.append(w20[j] if j >= 0 else None)
-    exit_info = exit_layer(dates, price, wk_idx, w20)
+    exit_ma = sma(price, EXIT_MA_DAYS)
+    exit_info = exit_layer(dates, price, wk_idx, [exit_ma[i] for i in wk_idx], exit_ma[-1])
 
     # MVRV Z = (market cap - realized cap) / std(market cap so far)  [expanding std, no look-ahead]
     mvrv_z, n, mean, m2 = [], 0, 0.0, 0.0
@@ -193,7 +190,7 @@ def compute(rows: list[dict]) -> dict:
     history = [
         {"d": dates[i], "p": round(price[i], 2), "s": round(score[i], 1),
          "w": round(ma1400[i], 2), "r": round(realized_price[i], 2) if realized_price[i] else None,
-         "m": round(ma20w_daily[i], 2) if ma20w_daily[i] else None}
+         "m": round(exit_ma[i], 2) if exit_ma[i] else None}
         for i in range(first_scored, len(dates))
     ]
 
@@ -218,6 +215,7 @@ def compute(rows: list[dict]) -> dict:
             "phase": halving_phase(months_since_halving),
         },
         "exit": exit_info,
+        "mining": mining.estimate(rows),
         "hashrate_change_30d": hashrate[last] / hr30 - 1 if hr30 else None,
         "history": history,
     }
@@ -229,13 +227,14 @@ def add_months(d: date, m: int) -> date:
 
 
 EXIT_WINDOW = (12, 24)  # months after a halving where every past cycle top formed
+EXIT_MA_DAYS = 50       # exit trend line: 50-day moving average
 
 
-def exit_layer(dates, price, wk_idx, w20) -> dict:
+def exit_layer(dates, price, wk_idx, w_ma, ma_now) -> dict:
     """Trend-break exit signal for the late cycle, evaluated day by day with no look-ahead.
 
     Rule: inside the exit window (12-24 months after a halving), once price makes a new all-time high
-    the signal is ARMED; the first completed weekly close below the 20-week moving average after that
+    the signal is ARMED; the first completed weekly close below the 50-day moving average after that
     TRIGGERS it (a cue to sell a bigger tranche). A further all-time high re-arms it.
     New all-time highs while armed are scale-out steps (cue to sell a small slice)."""
     today = date.fromisoformat(dates[-1])
@@ -258,20 +257,23 @@ def exit_layer(dates, price, wk_idx, w20) -> dict:
                 n_highs += 1
                 new_high_today = i == len(dates) - 1
             j = week_of.get(i)
-            if armed and j is not None and w20[j] and price[i] < w20[j]:
+            if armed and j is not None and w_ma[j] and price[i] < w_ma[j]:
                 triggers.append({"date": dates[i], "price": price[i], "from_high": price[i] / ath - 1,
                                  "high": ath, "high_date": dates[hi_i]})
                 armed = False
         for t in triggers:
             later = price[pos[t["date"]]: pos[t["date"]] + 800]
+            low_i = pos[t["date"]] + min(range(len(later)), key=lambda k: later[k]) if later else None
             t["later_low"] = min(later) / t["high"] - 1 if len(later) > 30 else None
+            t["low_date"] = dates[low_i] if low_i is not None else None
+            t["low_price"] = price[low_i] if low_i is not None else None
             t["low_final"] = pos[t["date"]] + 800 <= len(price)
             events.append({**t, "halving": h.isoformat()})
         current = {"halving": h, "start": start, "end": end, "armed": armed, "triggers": triggers,
                    "new_high_today": new_high_today, "ath": ath, "n_highs": n_highs}
 
     last_wk = wk_idx[-1]
-    w20_now = w20[-1]
+    ma_now = ma_now
     st = current
     if today < st["start"]:
         status, label = "waiting", "Not active yet"
@@ -279,12 +281,12 @@ def exit_layer(dates, price, wk_idx, w20) -> dict:
     elif today <= st["end"]:
         if st["armed"]:
             status, label = "armed", "Armed: new all-time highs in the exit window"
-            detail = (f"Each new all-time high is a scale-out step. A weekly close below the 20-week MA "
-                      f"(${w20_now:,.0f}) triggers the exit signal.")
+            detail = (f"Each new all-time high is a scale-out step. A weekly close below the 50-day MA "
+                      f"(${ma_now:,.0f}) triggers the exit signal.")
         elif st["triggers"]:
             t = st["triggers"][-1]
             status, label = "triggered", "Exit signal triggered"
-            detail = (f"Weekly close ${t['price']:,.0f} on {date.fromisoformat(t['date']):%-d %b %Y} fell below the 20-week MA, "
+            detail = (f"Weekly close ${t['price']:,.0f} on {date.fromisoformat(t['date']):%-d %b %Y} fell below the 50-day MA, "
                       f"{abs(t['from_high']) * 100:.0f}% under the ${t['high']:,.0f} high.")
         else:
             status, label = "watch", "Watching: exit window open"
@@ -303,7 +305,7 @@ def exit_layer(dates, price, wk_idx, w20) -> dict:
     return {
         "status": status, "label": label, "detail": detail,
         "window_start": st["start"].isoformat(), "window_end": st["end"].isoformat(),
-        "ma20w": w20_now, "price_vs_ma20w": price[-1] / w20_now - 1 if w20_now else None,
+        "exit_ma": ma_now, "price_vs_exit_ma": price[-1] / ma_now - 1 if ma_now else None,
         "new_high_today": st["new_high_today"] and status == "armed",
         "fired_recently": fired_recently and status in ("triggered", "closed"),
         "events": events,

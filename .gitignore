@@ -1,3 +1,9 @@
 .DS_Store
 .claude/
 .env
+
+# iOS build output
+ios/build/
+xcuserdata/
+*.xcuserstate
+DerivedData/

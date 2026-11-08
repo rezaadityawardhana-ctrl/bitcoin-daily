@@ -21,6 +21,17 @@ cp .env.example .env              # then fill in what you want (all optional)
 python3 run_daily.py --no-email --open
 ```
 
+## Open it anywhere from your phone (GitHub Pages web app)
+
+GitHub's servers build the dashboard every morning (~06:45 CET) and evening (~17:45 CET) and publish it at
+`https://<your-username>.github.io/bitcoin-daily/`. Your Mac can be off.
+
+On the iPhone, open that link in **Safari → Share → Add to Home Screen**. It then opens like the app: ₿ icon, full screen,
+dark animated bitcoin background, splash, live price on every open, and the last copy when you have no signal.
+Add `?app=1` to the address to preview app mode in a desktop browser.
+
+The page is public to anyone with the link (market data only) and asks search engines not to index it.
+
 ## Daily iPhone notification + dashboard link (runs on this Mac)
 
 Every day at 07:00 the Mac builds the dashboard and pushes a notification to your iPhone. Tapping it opens

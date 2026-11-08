@@ -12,7 +12,10 @@ from datetime import datetime
 
 import indicators
 import market
+import flows as flows_mod
 import news as news_mod
+import sentiment
+import ta
 import render
 from common import OUTPUT_DIR, load_env, wait_for_network
 
@@ -38,7 +41,7 @@ def plain_text(cycle, news, brief, spot) -> str:
     return "\n".join(lines)
 
 
-def notification_summary(cycle, news, brief, spot) -> dict:
+def notification_summary(cycle, news, brief, spot, market=None) -> dict:
     """Short text for the phone notification (also saved as output/summary.json)."""
     from indicators import zone_for
     summ = render.brief_summary(cycle, news, brief, spot)
@@ -57,6 +60,10 @@ def notification_summary(cycle, news, brief, spot) -> dict:
     lines.append(f"{render.pct(cycle['change_1d'])} 24h · {render.pct(cycle['change_30d'])} 30d · "
                  f"{abs(cycle['ath']['drawdown']) * 100:.0f}% below ATH")
     lines.append(render.playbook_action(cycle["zone"]))
+    if market and market["mood"].get("value") is not None:
+        etf = market["flows"].get("etf", {})
+        flow = f' · ETFs {render.money(etf["sum_7d"])} 7d' if "sum_7d" in etf else ""
+        lines.append(f'Mood: {market["mood"]["label"]} ({market["mood"]["value"]:.0f}/100){flow}')
     if not (ex["fired_recently"] or ex["new_high_today"]):
         lines.append(f"Exit signal: {ex['label']}")
     lines += [f"• {p}" for p in summ["news"]]
@@ -88,23 +95,43 @@ def main():
     cycle = indicators.compute(rows)
     print(f"Cycle score {cycle['score']:.1f} ({cycle['zone']['label']})")
 
-    print("Gathering news…")
+    print("Gathering news, flows and sentiment…")
     news = news_mod.gather()
-    brief = news_mod.summarize(news, cycle)
+    flows = flows_mod.gather()
+    for st in news["top"]:
+        st["tone"], st["tone_score"] = sentiment.story_tone(f'{st["title"]} {st["summary"]}')
+        st["flags"] = sentiment.agenda_flags(st, flows)
+    mood = sentiment.market_mood(news["top"], flows)
+    brief = news_mod.summarize(news, cycle, flows, mood)
+    market_view = {
+        "mood": mood, "flows": flows,
+        "interpretation": (brief.get("interpretation") if brief and brief.get("interpretation")
+                           else sentiment.interpret(mood, cycle, flows, news["top"])),
+        "interp_ai": bool(brief and brief.get("interpretation")),
+        "chf": market.fetch_chf(),
+        "ta": ta.build({"cycle_score": round(cycle["score"], 1), "cycle_zone": cycle["zone"]["label"],
+                        "exit_signal": cycle["exit"]["label"], "market_mood": mood.get("label"),
+                        "halving_months": round(cycle["halving"]["months_since"], 1)}),
+    }
+    if mood.get("value") is not None:
+        print(f"Market mood {mood['value']:.0f} ({mood['label']})")
     print(f"{len(news['top'])} stories, {len(news['research'])} research items, AI brief: {'yes' if brief else 'no'}")
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     generated = datetime.now().strftime("%-d %b %Y %H:%M")
     dash = OUTPUT_DIR / "dashboard.html"
-    dash.write_text(render.dashboard(cycle, news, brief, macro, spot, generated))
-    mail_html = render.email_html(cycle, news, brief, spot)
+    dash.write_text(render.dashboard(cycle, news, brief, macro, spot, generated, market_view))
+    mail_html = render.email_html(cycle, news, brief, spot, market_view)
     (OUTPUT_DIR / "email_preview.html").write_text(mail_html)
     # dated archive copy
     archive = OUTPUT_DIR / "archive"
     archive.mkdir(exist_ok=True)
     (archive / f"dashboard-{cycle['as_of']}.html").write_text(dash.read_text())
     (OUTPUT_DIR / "index.html").write_text(dash.read_text())  # what gets hosted
-    summary = notification_summary(cycle, news, brief, spot)
+    import shutil
+    for f in (OUTPUT_DIR.parent / "webapp").iterdir():  # manifest, icons, offline service worker
+        shutil.copy(f, OUTPUT_DIR / f.name)
+    summary = notification_summary(cycle, news, brief, spot, market_view)
     (OUTPUT_DIR / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"Dashboard: {dash}")
 

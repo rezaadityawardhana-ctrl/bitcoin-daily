@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from common import DATA_DIR, http_get, http_json
 
 CM_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
-CM_METRICS = ["PriceUSD", "CapMrktCurUSD", "CapMVRVCur", "IssTotUSD", "HashRate"]
+CM_METRICS = ["PriceUSD", "CapMrktCurUSD", "CapMVRVCur", "IssTotUSD", "HashRate", "IssTotNtv", "FeeTotNtv"]
 CACHE = DATA_DIR / "coinmetrics_cache.json"
 CACHE_MAX_AGE = 6 * 3600  # seconds
 
@@ -30,7 +30,9 @@ def _num(v):
 def fetch_coinmetrics(force: bool = False) -> list[dict]:
     """Full daily BTC history since 2010, cached locally for a few hours."""
     if not force and CACHE.exists() and time.time() - CACHE.stat().st_mtime < CACHE_MAX_AGE:
-        return json.loads(CACHE.read_text())
+        cached = json.loads(CACHE.read_text())
+        if cached and all(m in cached[-1] for m in CM_METRICS):  # refetch if the metric list changed
+            return cached
     url = (
         f"{CM_URL}?assets=btc&metrics={','.join(CM_METRICS)}&frequency=1d"
         "&page_size=10000&paging_from=start&start_time=2010-07-18"
@@ -48,6 +50,24 @@ def fetch_coinmetrics(force: bool = False) -> list[dict]:
     DATA_DIR.mkdir(exist_ok=True)
     CACHE.write_text(json.dumps(out))
     return out
+
+
+def fetch_chf() -> dict | None:
+    """BTC price in Swiss francs (Coinbase spot) and the USD/CHF exchange rate (ECB reference rates via Frankfurter)."""
+    try:
+        btc_chf = float(http_json("https://api.coinbase.com/v2/prices/BTC-CHF/spot")["data"]["amount"])
+        start = (datetime.now() - timedelta(days=14)).date().isoformat()
+        rates = sorted(http_json(f"https://api.frankfurter.dev/v1/{start}..?base=USD&symbols=CHF")["rates"].items())
+        series = [(d, r["CHF"]) for d, r in rates if "CHF" in r]
+        date_, fx = series[-1]
+        prev = series[-2][1] if len(series) > 1 else None
+        week = next((v for d, v in reversed(series) if d <= (datetime.fromisoformat(date_) - timedelta(days=7)).date().isoformat()), None)
+        return {"btc_chf": btc_chf, "usd_chf": fx, "date": date_,
+                "fx_change_1d": fx / prev - 1 if prev else None,
+                "fx_change_7d": fx / week - 1 if week else None}
+    except Exception as exc:
+        print(f"[market] CHF data unavailable: {exc}")
+        return None
 
 
 def fetch_spot() -> float | None:

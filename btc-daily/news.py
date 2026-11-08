@@ -191,6 +191,12 @@ Rules:
 - Keep "why it matters" to the long-term (months/years) view, not today's price.
 - If a story is minor or repeats another, drop it. Fewer, better items beat more.
 - key_points: the 2-3 takeaways a busy holder needs, each one plain sentence of at most 20 words.
+- sentiment: how the story reads for bitcoin's price (bullish / bearish / neutral), judged on substance, not wording.
+- agenda_note: one sentence on who benefits from the story or framing (e.g. a company talking its own book, an exchange-owned
+  outlet, a single anonymous source, a headline that the flow data contradicts). Empty string if nothing notable.
+- interpretation: 3-5 plain sentences for a long-term holder on how to read today. Compare what headlines say with what money
+  is doing (ETF flows, coins on exchanges, company treasuries). Note where sentiment is extreme and how similar extremes
+  played out in the provided cycle data. No buy/sell instructions; describe, don't command.
 - If nothing material happened, set quiet_day to true and say so in the overview."""
 
 SCHEMA = {
@@ -210,23 +216,28 @@ SCHEMA = {
                 "label": {"type": "string", "enum": ["fact", "report", "analysis"]},
                 "bull_view": {"type": "string"},
                 "bear_view": {"type": "string"},
+                "sentiment": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+                "agenda_note": {"type": "string",
+                                "description": "Who benefits from this story being told this way, or empty if nothing notable"},
             },
             "required": ["story_index", "headline", "what_happened", "why_it_matters", "label",
-                         "bull_view", "bear_view"],
+                         "bull_view", "bear_view", "sentiment", "agenda_note"],
             "additionalProperties": False,
         }},
+        "interpretation": {"type": "array", "items": {"type": "string"},
+                           "description": "3-5 short points on how a long-term holder should read today's mood, news and flows"},
         "research_takeaways": {"type": "array", "items": {
             "type": "object",
             "properties": {"story_index": {"type": "integer"}, "takeaway": {"type": "string"}},
             "required": ["story_index", "takeaway"], "additionalProperties": False,
         }},
     },
-    "required": ["overview", "key_points", "quiet_day", "items", "research_takeaways"],
+    "required": ["overview", "key_points", "quiet_day", "items", "interpretation", "research_takeaways"],
     "additionalProperties": False,
 }
 
 
-def summarize(news: dict, cycle: dict) -> dict | None:
+def summarize(news: dict, cycle: dict, flows: dict | None = None, mood: dict | None = None) -> dict | None:
     """Claude-written brief. Returns None (dashboard falls back to filtered headlines) when
     the anthropic package or credentials are missing, or on any API error."""
     if os.environ.get("BTC_DAILY_NO_AI"):
@@ -244,6 +255,17 @@ def summarize(news: dict, cycle: dict) -> dict | None:
             "date": cycle["as_of"], "cycle_score_0_100": round(cycle["score"], 1),
             "zone": cycle["zone"]["label"], "drawdown_from_ath": round(cycle["ath"]["drawdown"], 3),
             "indicators": {i["name"]: round(i["value"], 3) for i in cycle["indicators"]},
+        },
+        "market_mood": mood and {"value_0_100": round(mood["value"], 1) if mood.get("value") is not None else None,
+                                  "label": mood.get("label"), "inputs": mood.get("parts")},
+        "money_flows": flows and {
+            "etf_7d_usd_m": flows.get("etf", {}).get("sum_7d"), "etf_streak_days": flows.get("etf", {}).get("streak"),
+            "etf_biggest_fund_moves_7d_usd_m": flows.get("etf", {}).get("movers_7d"),
+            "coins_on_exchanges_change_7d_btc": flows.get("exchanges", {}).get("change_7d"),
+            "fear_greed": flows.get("fear_greed"),
+            "mining_cost_estimate": cycle.get("mining") and {k: cycle["mining"][k] for k in
+                ("all_in_cost", "price_vs_all_in", "price_vs_electricity", "hashrate_change_30d", "zone")},
+            "largest_company_holders": [(c["name"], round(c["btc"]), c["chg_7d"]) for c in flows.get("treasuries", {}).get("companies", [])[:6]],
         },
         "stories": [
             {"index": i, "headline": s["title"], "rss_summary": s["summary"], "category": s["category"],

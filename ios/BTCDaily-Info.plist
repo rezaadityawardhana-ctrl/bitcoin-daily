@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Extra Info.plist keys, merged with the ones Xcode generates from build settings. -->
+<plist version="1.0">
+<dict>
+	<!-- The dashboard is served over plain http by the Mac on your local network. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- dark launch screen so the app never flashes white before the splash -->
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
+	<!-- background refresh keeps the scheduled notification's text up to date -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.rezaawardhana.btcdaily.refresh</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>BTC Daily loads your dashboard from your Mac on the local network.</string>
+</dict>
+</plist>
