@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Always-on mini web server so your iPhone (same Wi-Fi) can open the dashboard. Installed by ./install_schedule.sh -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.btcdaily.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-m</string><string>http.server</string><string>__PORT__</string>
+    <string>--directory</string><string>__DIR__/output</string>
+  </array>
+  <key>WorkingDirectory</key><string>__HOME__</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/BitcoinDaily/server.log</string>
+</dict>
+</plist>

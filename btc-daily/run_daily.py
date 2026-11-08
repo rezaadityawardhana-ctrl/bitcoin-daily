@@ -14,7 +14,7 @@ import indicators
 import market
 import news as news_mod
 import render
-from common import OUTPUT_DIR, load_env
+from common import OUTPUT_DIR, load_env, wait_for_network
 
 
 def plain_text(cycle, news, brief, spot) -> str:
@@ -68,6 +68,9 @@ def main():
     args = ap.parse_args()
 
     load_env()
+    print(f"=== {datetime.now():%Y-%m-%d %H:%M} ===")
+    if not wait_for_network():
+        raise SystemExit("No internet connection after 5 minutes; giving up for today.")
     print("Fetching market data…")
     rows = market.fetch_coinmetrics()
     spot = market.fetch_spot()

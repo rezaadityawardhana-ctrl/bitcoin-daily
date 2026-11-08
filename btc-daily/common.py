@@ -49,3 +49,17 @@ def http_get(url: str, timeout: int = 30) -> bytes:
 
 def http_json(url: str, timeout: int = 30):
     return json.loads(http_get(url, timeout))
+
+
+def wait_for_network(max_wait: int = 300) -> bool:
+    """After the Mac wakes from sleep, Wi-Fi can take a minute to come back. Poll until online."""
+    import time
+    deadline = time.time() + max_wait
+    while True:
+        try:
+            http_get("https://api.coinbase.com/v2/time", timeout=10)
+            return True
+        except Exception:
+            if time.time() > deadline:
+                return False
+            time.sleep(15)

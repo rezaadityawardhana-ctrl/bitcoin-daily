@@ -21,42 +21,41 @@ cp .env.example .env              # then fill in what you want (all optional)
 python3 run_daily.py --no-email --open
 ```
 
-## Daily iPhone notification + dashboard link (recommended)
+## Daily iPhone notification + dashboard link (runs on this Mac)
 
-Every morning GitHub's cloud builds the dashboard, publishes it to a web page
-(GitHub Pages), and pushes a notification to your iPhone. Tap it to open the dashboard. Your Mac can be off.
+Every day at 07:00 the Mac builds the dashboard and pushes a notification to your iPhone. Tapping it opens
+the dashboard, served by a small always-on web server on this Mac.
 
-**1. iPhone (2 minutes)**
-- Install **ntfy** from the App Store, allow notifications, tap **+** and subscribe to the topic in your
-  `.env` (`NTFY_TOPIC`). Keep the default server, ntfy.sh.
+**1. iPhone:** install **ntfy** from the App Store, allow notifications, tap **+** and subscribe to the topic in
+`.env` (`NTFY_TOPIC`). Keep the default server, ntfy.sh.
 
-**2. GitHub (one time)**
-1. Sign in at github.com and create a new **public** repository, e.g. `bitcoin-daily`. GitHub Pages is
-   free for public repos. Your keys never go into the repo: they live in Secrets, and `.env` is git-ignored.
-2. Push this folder (`Documents/bitcoin-daily`, the one containing `.github/`):
-   ```bash
-   cd ~/Documents/bitcoin-daily
-   git commit -m "Bitcoin Daily"
-   git remote add origin https://github.com/<your-username>/bitcoin-daily.git
-   git push -u origin main
-   ```
-3. Repo → **Settings → Pages** → Source: **GitHub Actions**.
-4. Repo → **Settings → Secrets and variables → Actions** → add `NTFY_TOPIC` (same value as `.env`),
-   plus optionally `ANTHROPIC_API_KEY` and `FRED_API_KEY`.
-5. Repo → **Actions → Bitcoin Daily → Run workflow** to test it now. After that it runs daily at about 06:45 CET.
+**2. Mac:**
+```bash
+./install_schedule.sh            # daily run at 07:00 + dashboard server on port 8765
+./install_schedule.sh --remove   # undo both
+launchctl kickstart gui/$(id -u)/com.btcdaily.dashboard   # run it right now
+```
+The installer sets `DASHBOARD_URL` in `.env` to `http://<your-mac-name>.local:8765/`. Logs are in `~/Library/Logs/BitcoinDaily/`.
 
-**3. Make it feel like an app.** Open the dashboard link in Safari → Share → **Add to Home Screen**.
+**3. Make it feel like an app.** Open the link in Safari on the iPhone → Share → **Add to Home Screen**.
 
-The page address is `https://<your-username>.github.io/bitcoin-daily/`. Anyone with the link can view it (it holds only
-public market data and news); search engines are asked not to index it.
+**What to know**
+- The link opens when your iPhone is on the **same Wi-Fi as the Mac** and the Mac is **awake**. The notification
+  text itself (score, zone, action, top news) arrives anywhere.
+- To open the link away from home, install **Tailscale** (free) on the Mac and iPhone, then set `DASHBOARD_URL`
+  in `.env` to `http://<mac-tailscale-name>:8765/`.
+- If the Mac is asleep at 07:00, the run happens when it wakes (it waits up to 5 minutes for Wi-Fi). To have it ready
+  on time, schedule a wake in System Settings → Battery → Options, or run `sudo pmset repeat wake MTWRFSU 06:55:00`.
+- The first time, macOS may ask whether Python may accept incoming network connections. Choose **Allow**, or the
+  iPhone can't reach the page.
 
 ## Turn on the extras
 
-| Feature | What to put in `.env` (and in GitHub Secrets for the cloud run) |
+| Feature | What to put in `.env` |
 |---|---|
 | AI-analysed brief | `ANTHROPIC_API_KEY=…` and `pip3 install anthropic` (about a cent per day) |
 | Macro tiles | `FRED_API_KEY=…` (free: https://fred.stlouisfed.org/docs/api/api_key.html) |
-| Phone notification | `NTFY_TOPIC=…` (and `DASHBOARD_URL=…` for local runs) |
+| Phone notification | `NTFY_TOPIC=…` (`DASHBOARD_URL` is set by the installer) |
 | Daily email (optional) | `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_TO` (see below) |
 
 ### Email via Gmail (optional)
@@ -68,15 +67,13 @@ public market data and news); search engines are asked not to index it.
 The email is a lightweight summary that renders in Gmail, Outlook and Apple Mail. The full interactive
 dashboard is attached as `dashboard.html`.
 
-## Alternative: run it on this Mac instead of GitHub
+## Alternative: run it in the cloud (GitHub)
 
-```bash
-./install_schedule.sh            # daily at 07:00 via macOS launchd
-./install_schedule.sh --remove   # undo
-```
-
-The Mac must be on: if it's asleep at 07:00, the job runs when it wakes. A local run can still notify
-your phone, but the dashboard link only works on the iPhone if the page is hosted (the GitHub setup above).
+`.github/workflows/daily.yml` (in the parent folder) builds the dashboard in GitHub's cloud each morning, publishes
+it with GitHub Pages and sends the notification, so the link works anywhere even with the Mac off. To use it:
+create a public GitHub repo, push this folder, set **Settings → Pages → Source: GitHub Actions**, and add
+`NTFY_TOPIC` (plus optional `ANTHROPIC_API_KEY`, `FRED_API_KEY`) under **Settings → Secrets and variables → Actions**.
+Then remove the Mac schedule with `./install_schedule.sh --remove` so you don't get two notifications.
 
 ## Tuning
 - `indicators.py` → `SCORE_MAPS` holds the breakpoints for each indicator, and `ZONES` holds the zone cut-offs and playbook text.
