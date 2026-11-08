@@ -215,21 +215,58 @@ def past_turns(cycle) -> str:
     return "\n".join(rows)
 
 
+EXIT_STYLE = {  # status -> (css class, icon)
+    "waiting": ("ex-idle", "○"), "watch": ("ex-watch", "◔"), "armed": ("ex-armed", "◑"),
+    "triggered": ("ex-fired", "●"), "closed": ("ex-closed", "◉"),
+}
+
+
+def exit_card(cycle) -> str:
+    x = cycle["exit"]
+    cls, icon = EXIT_STYLE[x["status"]]
+    vs = x["price_vs_ma20w"]
+    steps = ('<li><b>Scale-out steps:</b> each new all-time high inside the window → sell a small slice (e.g. 5–10%).</li>'
+             '<li><b>Exit trigger:</b> first weekly close below the 20-week MA after a new high → sell a bigger tranche.</li>')
+    return f'''<div class="kpi exit-card {cls}">
+  <span class="eyebrow dark">Exit signal · late-cycle sell rule</span>
+  <div class="exit-status"><span class="exit-icon">{icon}</span><strong>{e(x["label"])}</strong></div>
+  <p>{e(x["detail"])}</p>
+  <ul class="exit-rules">{steps}</ul>
+  <em>Exit window: 12–24 months after each halving · 20-week MA now {usd(x["ma20w"])} (price {pct(vs, 0)} vs it)</em>
+</div>'''
+
+
+def past_exits(cycle) -> str:
+    rows = []
+    for ev in cycle["exit"]["events"]:
+        rows.append(f'<tr><td>{fmt_date(ev["high_date"])}<div class="muted small">{usd(ev["high"])}</div></td>'
+                    f'<td>{fmt_date(ev["date"])}<div class="muted small">{usd(ev["price"])}</div></td>'
+                    f'<td class="num">{pct(ev["from_high"], 0)}</td>'
+                    f'<td class="num">{pct(ev["later_low"], 0) if ev["later_low"] is not None else "–"}'
+                    f'{"" if ev["low_final"] else "<div class=\'muted small\'>so far</div>"}</td></tr>')
+    return "\n".join(rows)
+
+
 def macro_tiles(macro) -> str:
     if not macro:
-        return ('<p class="note">Add a free <code>FRED_API_KEY</code> in <code>.env</code> to show the Fed funds rate, '
-                'the 10-year Treasury yield and the dollar index here.</p>')
-    tiles = []
+        return '<p class="note">Macro data unavailable today.</p>'
+    rows = []
     for m in macro:
+        head = f'<div><div class="m-label">{e(m["label"])}</div><div class="m-src">{e(m["source"])}</div></div>'
         if "error" in m:
-            tiles.append(f'<div class="mrow"><span>{e(m["label"])}</span><span class="muted">unavailable</span></div>')
+            rows.append(f'<div class="mrow">{head}<span class="muted small">unavailable today</span></div>')
             continue
-        unit = "%" if m["id"] in ("DFF", "DGS10") else ""
         ch = m["change_30d"]
-        chs = "" if ch is None else (f'{ch * 100:+.0f} bp' if unit else f'{ch:+.2f}')
-        tiles.append(f'<div class="mrow"><span>{e(m["label"])}</span><span><strong>{m["value"]:.2f}{unit}</strong>'
-                     f' <span class="muted small">{chs} · 1M</span></span></div>')
-    return "".join(tiles)
+        if m["unit"] == "%":
+            val, chs = f'{m["value"]:.2f}%', ("" if ch is None else f'{ch * 100:+.0f} bp')
+        else:
+            val, chs = f'{m["value"]:.2f}', ("" if ch is None else f'{ch:+.2f}')
+        cls = "flat" if ch is None or abs(ch) < 1e-9 else ("up" if ch > 0 else "down")
+        note = f' · {e(m["note"])}' if m.get("note") else ""
+        rows.append(f'<div class="mrow">{head}<div class="m-val"><strong>{val}</strong>'
+                    f'<span class="m-chg {cls}">{chs or "–"} <em>1M</em></span>'
+                    f'<span class="m-src">{fmt_date(m["date"])}{note}</span></div></div>')
+    return "".join(rows)
 
 
 # ---------------------------------------------------------------- dashboard
@@ -240,8 +277,9 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
     price = spot or cycle["price_close"]
     as_of = datetime.fromisoformat(cycle["as_of"])
     today_long = datetime.now().strftime("%A, %-d %B %Y")
-    hist = [[x["d"], x["p"], x["s"], x["w"], x["r"]] for x in cycle["history"]]
-    data_json = json.dumps({"h": hist, "zones": [[u, ZONE_COLORS[k], l] for u, k, l, _ in ZONES]}).replace("</", "<\\/")
+    hist = [[x["d"], x["p"], x["s"], x["w"], x["r"], x["m"]] for x in cycle["history"]]
+    data_json = json.dumps({"h": hist, "zones": [[u, ZONE_COLORS[k], l] for u, k, l, _ in ZONES],
+                            "exits": [[ev["date"], ev["price"]] for ev in cycle["exit"]["events"]]}).replace("</", "<\\/")
     ai_note = f'Analysed by {e(brief["model"])}' if brief else "Filtered headlines · add an Anthropic key for analysis"
     failures = "".join(f"<li>{e(f)}</li>" for f in news["failures"])
     above_wma = price / cycle["wma200"] - 1
@@ -272,6 +310,7 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
       {gauge_svg(cycle["score"])}
       <div class="zone-pill" style="--zc:{ZONE_COLORS[z["key"]]}"><span></span>{e(z["label"])}</div>
       <div class="h-action">{e(playbook_action(z))}</div>
+      <div class="h-exit">Exit signal: <b>{e(cycle["exit"]["label"])}</b></div>
     </div>
     <div class="h-summary">
       <div class="eyebrow">Today in 30 seconds</div>
@@ -288,11 +327,9 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
 <nav class="tabs"><a href="#brief">Brief</a><a href="#indicators">Indicators</a><a href="#history">History</a><a href="#record">Track record</a></nav>
 
 <section class="kpis">
+  {exit_card(cycle)}
   <div class="kpi"><span class="eyebrow dark">Halving cycle</span><strong>{cycle["halving"]["months_since"]:.0f} months</strong>
     <p>{e(cycle["halving"]["phase"])}</p><em>Next ≈ {fmt_date(cycle["halving"]["next_est"])} · {cycle["halving"]["days_to_next"]} days</em></div>
-  <div class="kpi"><span class="eyebrow dark">Drawdown context</span><strong>{pct(cycle["ath"]["drawdown"], 0)}</strong>
-    <p>The last three bear markets bottomed roughly 77–86% below their highs, each shallower than the one before.</p>
-    <em>Peak {usd(cycle["ath"]["price"])} · {fmt_date(cycle["ath"]["date"])}</em></div>
   <div class="kpi"><span class="eyebrow dark">Network security</span><strong>{pct(cycle["hashrate_change_30d"])}</strong>
     <p>Hashrate change over 30 days. Rising hashrate means miners keep investing in the network.</p><em>Source: Coin Metrics</em></div>
 </section>
@@ -332,9 +369,10 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
     <div class="ranges" role="group" aria-label="Time range">
       <button data-r="all">Since 2014</button><button data-r="4y" class="on">4 years</button><button data-r="1y">1 year</button>
     </div></div>
+  <p class="note small">Both charts share one time axis; hover either to read the same date on both. Dashed lines mark past exit signals.</p>
   <h3 class="chart-title">Cycle score</h3>
   <div class="chart" id="c-score"></div>
-  <div class="chart-head"><h3 class="chart-title">Price vs long-run anchors <span class="meta-note">log scale</span></h3>
+  <div class="chart-head"><h3 class="chart-title">Price, exit line and long-run anchors <span class="meta-note">log scale</span></h3>
     <div class="legend" id="lg-price"></div></div>
   <div class="chart" id="c-price"></div>
 </section>
@@ -357,15 +395,20 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str) -> str:
       </table></div>
     </div>
   </div>
+  <h3>Exit signal at past tops <span class="meta-note">rule applied day by day, no hindsight</span></h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Cycle top</th><th>Exit signal</th><th class="num">From top</th><th class="num">Bear low from top</th></tr></thead>
+    <tbody>{past_exits(cycle)}</tbody>
+  </table></div>
   <div class="callout"><strong>Honest read.</strong> The score has reliably flagged cycle <em>bottoms</em> (all three scored below 5).
   It flagged the 2017 top clearly, but the 2021 and 2025 tops were less extreme on these metrics, so the score stayed
-  neutral. Treat the exit side as a guide, not a trigger, and pair it with a scale-out plan you set in advance.
-  Only about three full cycles of data exist, and the windows overlap.</div>
+  neutral. That is why selling uses the separate exit signal: it caught the slow 2021 and 2025 tops 27% and 13%
+  below the peak, while the score caught the 2017 spike. Neither picks the exact top, and only four cycles exist to test on.</div>
 </section>
 
 <footer>
   <p><strong>Sources.</strong> Coin Metrics Community API (price, market cap, MVRV, miner issuance, hashrate) · Coinbase (spot) ·
-  FRED (macro) · Federal Reserve, SEC, Bitcoin Optech (T1) · Coin Metrics research (T2) · Reuters, Bloomberg, FT, WSJ, CNBC, AP,
+  New York Fed, US Treasury, ECB reference rates (macro) · Federal Reserve, SEC, Bitcoin Optech (T1) · Coin Metrics research (T2) · Reuters, Bloomberg, FT, WSJ, CNBC, AP,
   CoinDesk, The Block, Decrypt (T3).</p>
   <p><strong>Noise filter.</strong> Price predictions, altcoins, sponsored content and topic pages are removed; duplicate stories are
   merged; items are ranked by source tier, topic and corroboration. {news["scanned"]} items passed the first filter today.</p>
@@ -387,13 +430,13 @@ PAGE = r'''<!doctype html>
 <style>
 :root{color-scheme:light;--page:#f4f3ef;--surface:#ffffff;--surface2:#faf9f6;--ink:#0d0d0e;--ink2:#4e4d49;--muted:#8b8982;
 --grid:#ebe9e3;--axis:#cfcdc5;--ring:rgba(13,13,14,.08);--shadow:0 1px 2px rgba(16,17,19,.04),0 10px 30px -12px rgba(16,17,19,.10);
---s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--wash:rgba(13,13,14,.035);--bandop:.16;--up:#0b7a2e;--down:#c23b3b;--btc:#f7931a}
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--wash:rgba(13,13,14,.035);--bandop:.16;--up:#0b7a2e;--down:#c23b3b;--btc:#f7931a}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--page:#0a0a0b;--surface:#151517;--surface2:#1b1b1e;--ink:#f2f1ed;
 --ink2:#c3c2b9;--muted:#8d8b84;--grid:#26262a;--axis:#36363b;--ring:rgba(255,255,255,.08);--shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px -12px rgba(0,0,0,.5);
---s1:#3987e5;--s2:#d95926;--s3:#199e70;--wash:rgba(255,255,255,.045);--bandop:.22;--up:#2fbf5b;--down:#ec6b6b}}
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--wash:rgba(255,255,255,.045);--bandop:.22;--up:#2fbf5b;--down:#ec6b6b}}
 :root[data-theme="dark"]{color-scheme:dark;--page:#0a0a0b;--surface:#151517;--surface2:#1b1b1e;--ink:#f2f1ed;--ink2:#c3c2b9;--muted:#8d8b84;
 --grid:#26262a;--axis:#36363b;--ring:rgba(255,255,255,.08);--shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px -12px rgba(0,0,0,.5);
---s1:#3987e5;--s2:#d95926;--s3:#199e70;--wash:rgba(255,255,255,.045);--bandop:.22;--up:#2fbf5b;--down:#ec6b6b}
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--wash:rgba(255,255,255,.045);--bandop:.22;--up:#2fbf5b;--down:#ec6b6b}
 *{box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--page);color:var(--ink);font:15px/1.55 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;
@@ -445,7 +488,12 @@ p{margin:6px 0}.muted{color:var(--muted)}.small{font-size:13px}code{font-size:12
  border:1px solid var(--ring);border-radius:999px;padding:5px;box-shadow:var(--shadow)}
 .tabs a{font-size:13px;font-weight:500;color:var(--ink2);padding:6px 14px;border-radius:999px}.tabs a:hover{background:var(--wash);text-decoration:none;color:var(--ink)}
 
-.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.kpis{display:grid;grid-template-columns:2fr 1fr 1fr;gap:18px}
+.exit-status{display:flex;align-items:center;gap:10px;margin:6px 0 2px}.exit-status strong{font-size:20px;letter-spacing:-.01em}
+.exit-icon{font-size:20px;line-height:1}.ex-fired .exit-icon,.ex-armed .exit-icon{color:var(--down)}.ex-closed .exit-icon{color:var(--muted)}.ex-watch .exit-icon{color:var(--btc)}
+.ex-fired,.ex-armed{border-color:color-mix(in srgb,var(--down) 45%,transparent)}
+.exit-rules{margin:4px 0 10px;padding-left:18px;font-size:13px;color:var(--ink2)}.exit-rules li{margin:2px 0}
+.h-exit{font-size:12px;color:#9c9a92;margin-top:6px}.h-exit b{color:#e6e4de;font-weight:600}
 .kpi{background:var(--surface);border:1px solid var(--ring);border-radius:18px;padding:18px 20px;box-shadow:var(--shadow);display:flex;flex-direction:column}
 .kpi strong{font-size:28px;font-weight:700;letter-spacing:-.02em;margin:4px 0 2px;font-variant-numeric:tabular-nums}
 .kpi p{font-size:13.5px;color:var(--ink2);flex:1}.kpi em{font-style:normal;font-size:12px;color:var(--muted)}
@@ -478,6 +526,9 @@ b.tier{margin:0 6px 0 0;padding:1px 6px;border-radius:5px;background:var(--wash)
 .r-title{font-weight:600;line-height:1.35}.r-text{font-size:13px;color:var(--ink2)}
 .mrow{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:9px 0;border-top:1px solid var(--grid);font-size:14px}
 .mrow:first-of-type{border-top:0}
+.m-label{font-weight:500}.m-src{font-size:11.5px;color:var(--muted)}
+.m-val{display:flex;flex-direction:column;align-items:flex-end;text-align:right}.m-val strong{font-size:18px;font-variant-numeric:tabular-nums}
+.m-chg{font-size:12px;font-variant-numeric:tabular-nums;color:var(--ink2)}.m-chg em{font-style:normal;color:var(--muted)}
 .ind-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 .ind-card{border:1px solid var(--ring);border-radius:14px;padding:16px;background:var(--surface2)}
 .ind-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
@@ -503,7 +554,9 @@ td{border-bottom:1px solid var(--grid);padding:10px 8px;vertical-align:top}tbody
  box-shadow:0 8px 24px rgba(0,0,0,.16);white-space:nowrap;display:none;z-index:2}.tip b{font-weight:600}.tip .r{display:flex;justify-content:space-between;gap:16px}
 footer{padding:4px 6px;font-size:12.5px;color:var(--muted)}footer p{margin:6px 0}footer strong{color:var(--ink2)}
 @media (max-width:1020px){.hero-grid{grid-template-columns:1fr 1fr}.h-summary{grid-column:1/-1}.ind-grid{grid-template-columns:1fr 1fr}}
-@media (max-width:860px){.cols,.cols.even{grid-template-columns:1fr}.kpis{grid-template-columns:1fr}}
+@media (max-width:1020px){.kpis{grid-template-columns:1fr 1fr}.exit-card{grid-column:1/-1}}
+@media (max-width:860px){.cols,.cols.even{grid-template-columns:1fr}}
+@media (max-width:600px){.kpis{grid-template-columns:1fr}}
 @media (max-width:600px){.hero{padding:18px}.hero-grid{grid-template-columns:1fr;gap:22px}.price{font-size:44px}
  .views{grid-template-columns:1fr}.ind-grid{grid-template-columns:1fr}.panel{padding:18px}.chip{display:none}}
 </style></head><body><main>
@@ -512,20 +565,22 @@ footer{padding:4px 6px;font-size:12.5px;color:var(--muted)}footer p{margin:6px 0
 <script>
 const D={{DATA}};
 const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-const rows=D.h.map(r=>({t:Date.parse(r[0]),d:r[0],p:r[1],s:r[2],w:r[3],r:r[4]}));
+const rows=D.h.map(r=>({t:Date.parse(r[0]),d:r[0],p:r[1],s:r[2],w:r[3],r:r[4],m:r[5]}));
+const exits=D.exits.map(x=>({t:Date.parse(x[0]),p:x[1]}));
 const fmtUsd=v=>v==null?'–':'$'+Math.round(v).toLocaleString('en-US');
+const fmtK=v=>v>=1000?'$'+(v/1000).toFixed(v>=1e5?0:1)+'k':'$'+Math.round(v);
 const fmtDate=t=>new Date(t).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'});
 const NS='http://www.w3.org/2000/svg';
-let range='4y';
+let range='4y';const charts=[];
 function el(tag,attrs,parent){const n=document.createElementNS(NS,tag);for(const k in attrs)n.setAttribute(k,attrs[k]);if(parent)parent.appendChild(n);return n}
 function zoneOf(s){for(const z of D.zones)if(s<z[0])return z;return D.zones[D.zones.length-1]}
+function visible(){const last=rows[rows.length-1].t,span={all:Infinity,'4y':4*365.25*864e5,'1y':365.25*864e5}[range];return rows.filter(r=>last-r.t<=span)}
 
+// Every chart uses the SAME data window and the SAME left/right margins, so a date sits at the same x in each.
 function chart(id,cfg){
   const box=document.getElementById(id);box.innerHTML='';
-  const W=box.clientWidth,H=box.clientHeight,gutter=cfg.bands&&W>=560,m={l:58,r:gutter?132:12,t:10,b:26};
-  const last=rows[rows.length-1].t, span={all:Infinity,'4y':4*365.25*864e5,'1y':365.25*864e5}[range];
-  const data=rows.filter(r=>last-r.t<=span);
-  const x0=data[0].t,x1=last,X=t=>m.l+(t-x0)/(x1-x0)*(W-m.l-m.r);
+  const W=box.clientWidth,H=box.clientHeight,gutter=W>=560,m={l:58,r:gutter?132:12,t:14,b:26};
+  const data=visible(),x0=data[0].t,x1=data[data.length-1].t,X=t=>m.l+(t-x0)/(x1-x0)*(W-m.l-m.r);
   let lo,hi;
   if(cfg.log){lo=Infinity;hi=0;for(const r of data)for(const s of cfg.series){const v=r[s.k];if(v){lo=Math.min(lo,v);hi=Math.max(hi,v)}}lo=Math.log10(lo*0.9);hi=Math.log10(hi*1.1)}
   else{lo=0;hi=100}
@@ -540,37 +595,54 @@ function chart(id,cfg){
   else ticks=[0,20,40,70,85,100];
   for(const v of ticks){const y=Y(v);if(!cfg.bands)el('line',{x1:m.l,x2:W-m.r,y1:y,y2:y,stroke:css('--grid')},svg);
     const t=el('text',{x:m.l-8,y:y+4,'text-anchor':'end','font-size':11,fill:css('--muted'),'font-variant-numeric':'tabular-nums'},svg);
-    t.textContent=cfg.log?(v>=1000?'$'+(v/1000)+'k':'$'+v):v}
-  const yrs=new Date(x0).getUTCFullYear(),yre=new Date(x1).getUTCFullYear();
-  const xt=[];if(range==='1y'){const d=new Date(x0);d.setUTCDate(1);while(d.getTime()<=x1){d.setUTCMonth(d.getUTCMonth()+1);if(d.getUTCMonth()%3===0&&d.getTime()<=x1)xt.push([d.getTime(),d.toLocaleDateString('en-GB',{month:'short',year:'2-digit',timeZone:'UTC'})])}}
-  else{const step=range==='all'?2:1;for(let y=yrs+1;y<=yre;y+=step)xt.push([Date.UTC(y,0,1),String(y)])}
-  for(const [t,l] of xt){const tx=el('text',{x:X(t),y:H-6,'text-anchor':'middle','font-size':11,fill:css('--muted')},svg);tx.textContent=l}
+    t.textContent=cfg.log?fmtK(v):v}
+  const xt=[];
+  if(range==='1y'){const d=new Date(x0);d.setUTCDate(1);while(d.getTime()<=x1){d.setUTCMonth(d.getUTCMonth()+1);if(d.getUTCMonth()%3===0&&d.getTime()<=x1)xt.push([d.getTime(),d.toLocaleDateString('en-GB',{month:'short',year:'2-digit',timeZone:'UTC'})])}}
+  else{const step=range==='all'?2:1;for(let y=new Date(x0).getUTCFullYear()+1;y<=new Date(x1).getUTCFullYear();y+=step)xt.push([Date.UTC(y,0,1),String(y)])}
+  for(const [t,l] of xt){el('line',{x1:X(t),x2:X(t),y1:H-m.b,y2:H-m.b+4,stroke:css('--axis')},svg);
+    const tx=el('text',{x:X(t),y:H-6,'text-anchor':'middle','font-size':11,fill:css('--muted'),'data-tick':l},svg);tx.textContent=l}
   el('line',{x1:m.l,x2:W-m.r,y1:H-m.b,y2:H-m.b,stroke:css('--axis')},svg);
+  // past exit signals: same dashed line on every chart
+  for(const ex of exits){if(ex.t<x0||ex.t>x1)continue;const x=X(ex.t);
+    el('line',{x1:x,x2:x,y1:m.t,y2:H-m.b,stroke:css('--down'),'stroke-dasharray':'4 3','stroke-width':1.5},svg);
+    const lb=el('text',{x:x+4,y:m.t+2,'font-size':10,'font-weight':600,fill:css('--ink2')},svg);lb.textContent='Exit signal';
+    if(cfg.log)el('path',{d:`M${x-5} ${Y(ex.p)-11}L${x+5} ${Y(ex.p)-11}L${x} ${Y(ex.p)-3}Z`,fill:css('--down')},svg)}
   for(const s of cfg.series){let d='',pen=false;for(const r of data){const v=r[s.k];if(v==null){pen=false;continue}d+=(pen?'L':'M')+X(r.t).toFixed(1)+' '+Y(v).toFixed(1);pen=true}
-    el('path',{d,fill:'none',stroke:css(s.c),'stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round'},svg)}
+    el('path',{d,fill:'none',stroke:css(s.c),'stroke-width':s.w||2,'stroke-linejoin':'round','stroke-linecap':'round'},svg)}
+  // direct end labels in the right gutter (de-overlapped)
+  if(cfg.endLabels&&gutter){const lr=data[data.length-1];
+    const labs=cfg.series.filter(s=>lr[s.k]!=null).map(s=>({s,y:Y(lr[s.k])})).sort((a,b)=>a.y-b.y);
+    for(let i=1;i<labs.length;i++)if(labs[i].y-labs[i-1].y<15)labs[i].y=labs[i-1].y+15;
+    for(const l of labs){el('rect',{x:W-m.r+8,y:l.y-4,width:8,height:3,rx:1.5,fill:css(l.s.c)},svg);
+      const t=el('text',{x:W-m.r+20,y:l.y+1,'font-size':11,fill:css('--ink2')},svg);t.textContent=l.s.short+' '+fmtK(lr[l.s.k])}}
+  // hover (synced across charts)
   const vline=el('line',{y1:m.t,y2:H-m.b,stroke:css('--muted'),'stroke-dasharray':'3 3',visibility:'hidden'},svg);
   const dots=cfg.series.map(s=>el('circle',{r:4,fill:css(s.c),stroke:css('--surface'),'stroke-width':2,visibility:'hidden'},svg));
   const tip=document.createElement('div');tip.className='tip';box.appendChild(tip);
   const hit=el('rect',{x:m.l,y:0,width:W-m.l-m.r,height:H,fill:'transparent'},svg);
-  function move(ev){const rect=svg.getBoundingClientRect();const px=(ev.touches?ev.touches[0].clientX:ev.clientX)-rect.left;
-    const t=x0+(px-m.l)/(W-m.l-m.r)*(x1-x0);let a=0,b=data.length-1;while(b-a>1){const mid=(a+b)>>1;if(data[mid].t<t)a=mid;else b=mid}
-    const r=Math.abs(data[a].t-t)<Math.abs(data[b].t-t)?data[a]:data[b];const x=X(r.t);
+  function nearest(t){let a=0,b=data.length-1;while(b-a>1){const mid=(a+b)>>1;if(data[mid].t<t)a=mid;else b=mid}return Math.abs(data[a].t-t)<Math.abs(data[b].t-t)?data[a]:data[b]}
+  function show(t){const r=nearest(t),x=X(r.t);
     vline.setAttribute('x1',x);vline.setAttribute('x2',x);vline.setAttribute('visibility','visible');
     let h='<b>'+fmtDate(r.t)+'</b>';
     cfg.series.forEach((s,i)=>{const v=r[s.k];if(v==null){dots[i].setAttribute('visibility','hidden');return}
       dots[i].setAttribute('cx',x);dots[i].setAttribute('cy',Y(v));dots[i].setAttribute('visibility','visible');
       h+='<div class="r"><span>'+s.label+'</span><b>'+s.f(v)+'</b></div>'});
     if(cfg.bands)h+='<div class="r"><span>Zone</span><b>'+zoneOf(r.s)[2]+'</b></div>';
-    if(cfg.extra)h+=cfg.extra(r);
-    tip.innerHTML=h;tip.style.display='block';const tw=tip.offsetWidth;tip.style.left=(x+12+tw>W?x-12-tw:x+12)+'px';tip.style.top='8px'}
-  function leave(){vline.setAttribute('visibility','hidden');dots.forEach(d=>d.setAttribute('visibility','hidden'));tip.style.display='none'}
-  hit.addEventListener('mousemove',move);hit.addEventListener('touchmove',move,{passive:true});hit.addEventListener('mouseleave',leave);
+    tip.innerHTML=h;tip.style.display='block';const tw=tip.offsetWidth;tip.style.left=(x+12+tw>W-m.r?x-12-tw:x+12)+'px';tip.style.top='8px'}
+  function hide(){vline.setAttribute('visibility','hidden');dots.forEach(d=>d.setAttribute('visibility','hidden'));tip.style.display='none'}
+  function move(ev){const rect=svg.getBoundingClientRect();const px=(ev.touches?ev.touches[0].clientX:ev.clientX)-rect.left;
+    const t=x0+(px-m.l)/(W-m.l-m.r)*(x1-x0);charts.forEach(c=>c.show(t))}
+  hit.addEventListener('mousemove',move);hit.addEventListener('touchmove',move,{passive:true});
+  hit.addEventListener('mouseleave',()=>charts.forEach(c=>c.hide()));
+  return {show,hide};
 }
-const priceSeries=[{k:'p',label:'BTC price',c:'--s1',f:fmtUsd},{k:'w',label:'200-week MA',c:'--s2',f:fmtUsd},{k:'r',label:'Realized price',c:'--s3',f:fmtUsd}];
+const priceSeries=[{k:'p',label:'BTC price',short:'BTC',c:'--s1',f:fmtUsd},{k:'m',label:'20-week MA (exit line)',short:'20W',c:'--s4',f:fmtUsd,w:1.75},
+  {k:'w',label:'200-week MA',short:'200W',c:'--s2',f:fmtUsd},{k:'r',label:'Realized price',short:'Realized',c:'--s3',f:fmtUsd}];
 function legend(){document.getElementById('lg-price').innerHTML=priceSeries.map(s=>'<span><i style="background:'+css(s.c)+'"></i>'+s.label+'</span>').join('')}
 function draw(){
-  chart('c-score',{series:[{k:'s',label:'Cycle score',c:'--ink',f:v=>v.toFixed(0)}],bands:true,aria:'Cycle score over time with zone bands',extra:r=>'<div class="r"><span>BTC price</span><b>'+fmtUsd(r.p)+'</b></div>'});
-  chart('c-price',{series:priceSeries,log:true,aria:'BTC price, 200-week moving average and realized price, log scale'});
+  charts.length=0;
+  charts.push(chart('c-score',{series:[{k:'s',label:'Cycle score',c:'--ink',f:v=>v.toFixed(0)}],bands:true,aria:'Cycle score over time with zone bands'}));
+  charts.push(chart('c-price',{series:priceSeries,log:true,endLabels:true,aria:'BTC price, 20-week, 200-week moving averages and realized price, log scale'}));
   legend();
 }
 document.querySelectorAll('.ranges button').forEach(b=>b.addEventListener('click',()=>{range=b.dataset.r;
@@ -600,7 +672,8 @@ def email_html(cycle, news, brief, spot) -> str:
 
     bullet = lambda t, c="#f7931a": (f'<tr><td width="18" valign="top" style="color:{c};font-size:9px;padding-top:6px">◆</td>'
                                      f'<td style="font-size:14px;line-height:1.5;color:#2b2a27;padding-bottom:8px">{e(t)}</td></tr>')
-    tldr = bullet(summ["market"]) + bullet(summ["score"]) + "".join(bullet(p, "#a9a8a0") for p in summ["news"])
+    tldr = (bullet(summ["market"]) + bullet(summ["score"]) + bullet(f'Exit signal: {cycle["exit"]["label"]}. {cycle["exit"]["detail"]}', "#c23b3b")
+            + "".join(bullet(p, "#a9a8a0") for p in summ["news"]))
 
     stories = ""
     for it in items:
@@ -685,5 +758,5 @@ def email_html(cycle, news, brief, spot) -> str:
 </td></tr>
 
 <tr><td style="padding:16px 8px;font-size:12px;color:#8b8982;line-height:1.5">The full interactive dashboard is attached. Rule-based signals from public
-data (Coin Metrics, Coinbase, FRED and the listed news sources), not personalised financial advice.</td></tr>
+data (Coin Metrics, Coinbase, New York Fed, US Treasury, ECB and the listed news sources), not personalised financial advice.</td></tr>
 </table></td></tr></table></body></html>'''

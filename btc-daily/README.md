@@ -9,7 +9,7 @@ A daily, low-noise Bitcoin dashboard and email for long-term holders:
 - **Today's brief**: news from tiered sources (official → research → outlets), with noise removed and duplicates
   merged. With an Anthropic key, Claude writes a neutral, cited summary: what happened, why it matters,
   and a bull and a bear reading.
-- **Macro & network**: Fed funds rate, 10-year yield, dollar index (FRED) and hashrate.
+- **Macro & network**: Fed funds rate (New York Fed), 10-year yield (US Treasury), dollar index (ECB rates) and hashrate. No API keys needed.
 
 Only Python 3.10+ is required. Everything except the AI brief uses the standard library.
 
@@ -54,7 +54,6 @@ The installer sets `DASHBOARD_URL` in `.env` to `http://<your-mac-name>.local:87
 | Feature | What to put in `.env` |
 |---|---|
 | AI-analysed brief | `ANTHROPIC_API_KEY=…` and `pip3 install anthropic` (about a cent per day) |
-| Macro tiles | `FRED_API_KEY=…` (free: https://fred.stlouisfed.org/docs/api/api_key.html) |
 | Phone notification | `NTFY_TOPIC=…` (`DASHBOARD_URL` is set by the installer) |
 | Daily email (optional) | `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_TO` (see below) |
 
@@ -72,7 +71,7 @@ dashboard is attached as `dashboard.html`.
 `.github/workflows/daily.yml` (in the parent folder) builds the dashboard in GitHub's cloud each morning, publishes
 it with GitHub Pages and sends the notification, so the link works anywhere even with the Mac off. To use it:
 create a public GitHub repo, push this folder, set **Settings → Pages → Source: GitHub Actions**, and add
-`NTFY_TOPIC` (plus optional `ANTHROPIC_API_KEY`, `FRED_API_KEY`) under **Settings → Secrets and variables → Actions**.
+`NTFY_TOPIC` (plus optional `ANTHROPIC_API_KEY`) under **Settings → Secrets and variables → Actions**.
 Then remove the Mac schedule with `./install_schedule.sh --remove` so you don't get two notifications.
 
 ## Tuning

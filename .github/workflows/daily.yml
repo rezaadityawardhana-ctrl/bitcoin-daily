@@ -27,7 +27,6 @@ jobs:
         working-directory: btc-daily
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
     steps:
       - uses: actions/checkout@v4

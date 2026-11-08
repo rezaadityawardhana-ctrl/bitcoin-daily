@@ -120,6 +120,17 @@ def compute(rows: list[dict]) -> dict:
     iss365 = sma(iss, 365)
     rsi_w = weekly_rsi_by_day(dates, price)
 
+    # completed weekly closes and their 20-week moving average (the exit "trend line")
+    keys = [date.fromisoformat(d).isocalendar()[:2] for d in dates]
+    wk_idx = [i for i in range(len(dates) - 1) if keys[i + 1] != keys[i]]
+    w20 = sma([price[i] for i in wk_idx], 20)
+    ma20w_daily, j = [], -1
+    for i in range(len(dates)):
+        while j + 1 < len(wk_idx) and wk_idx[j + 1] <= i:
+            j += 1
+        ma20w_daily.append(w20[j] if j >= 0 else None)
+    exit_info = exit_layer(dates, price, wk_idx, w20)
+
     # MVRV Z = (market cap - realized cap) / std(market cap so far)  [expanding std, no look-ahead]
     mvrv_z, n, mean, m2 = [], 0, 0.0, 0.0
     for mc, mv in zip(mcap, mvrv):
@@ -181,7 +192,8 @@ def compute(rows: list[dict]) -> dict:
     first_scored = next(i for i, s in enumerate(score) if s is not None)
     history = [
         {"d": dates[i], "p": round(price[i], 2), "s": round(score[i], 1),
-         "w": round(ma1400[i], 2), "r": round(realized_price[i], 2) if realized_price[i] else None}
+         "w": round(ma1400[i], 2), "r": round(realized_price[i], 2) if realized_price[i] else None,
+         "m": round(ma20w_daily[i], 2) if ma20w_daily[i] else None}
         for i in range(first_scored, len(dates))
     ]
 
@@ -205,8 +217,96 @@ def compute(rows: list[dict]) -> dict:
             "days_to_next": (NEXT_HALVING_EST - today).days,
             "phase": halving_phase(months_since_halving),
         },
+        "exit": exit_info,
         "hashrate_change_30d": hashrate[last] / hr30 - 1 if hr30 else None,
         "history": history,
+    }
+
+
+def add_months(d: date, m: int) -> date:
+    y, mo = d.year + (d.month - 1 + m) // 12, (d.month - 1 + m) % 12 + 1
+    return date(y, mo, min(d.day, 28))
+
+
+EXIT_WINDOW = (12, 24)  # months after a halving where every past cycle top formed
+
+
+def exit_layer(dates, price, wk_idx, w20) -> dict:
+    """Trend-break exit signal for the late cycle, evaluated day by day with no look-ahead.
+
+    Rule: inside the exit window (12-24 months after a halving), once price makes a new all-time high
+    the signal is ARMED; the first completed weekly close below the 20-week moving average after that
+    TRIGGERS it (a cue to sell a bigger tranche). A further all-time high re-arms it.
+    New all-time highs while armed are scale-out steps (cue to sell a small slice)."""
+    today = date.fromisoformat(dates[-1])
+    pos = {d: i for i, d in enumerate(dates)}
+    week_of = {i: j for j, i in enumerate(wk_idx)}
+    events, current = [], None
+    for h in HALVINGS:
+        start, end = add_months(h, EXIT_WINDOW[0]), add_months(h, EXIT_WINDOW[1])
+        first = next((i for i, d in enumerate(dates) if date.fromisoformat(d) >= start), None)
+        if first is None:
+            continue
+        ath = max(price[:first]) if first else 0
+        armed, hi_i, n_highs, triggers = False, None, 0, []
+        new_high_today = False
+        for i in range(first, len(dates)):
+            if date.fromisoformat(dates[i]) > end:
+                break
+            if price[i] > ath:
+                ath, armed, hi_i = price[i], True, i
+                n_highs += 1
+                new_high_today = i == len(dates) - 1
+            j = week_of.get(i)
+            if armed and j is not None and w20[j] and price[i] < w20[j]:
+                triggers.append({"date": dates[i], "price": price[i], "from_high": price[i] / ath - 1,
+                                 "high": ath, "high_date": dates[hi_i]})
+                armed = False
+        for t in triggers:
+            later = price[pos[t["date"]]: pos[t["date"]] + 800]
+            t["later_low"] = min(later) / t["high"] - 1 if len(later) > 30 else None
+            t["low_final"] = pos[t["date"]] + 800 <= len(price)
+            events.append({**t, "halving": h.isoformat()})
+        current = {"halving": h, "start": start, "end": end, "armed": armed, "triggers": triggers,
+                   "new_high_today": new_high_today, "ath": ath, "n_highs": n_highs}
+
+    last_wk = wk_idx[-1]
+    w20_now = w20[-1]
+    st = current
+    if today < st["start"]:
+        status, label = "waiting", "Not active yet"
+        detail = f"The exit window opens on {st['start']:%-d %b %Y} (12 months after the halving)."
+    elif today <= st["end"]:
+        if st["armed"]:
+            status, label = "armed", "Armed: new all-time highs in the exit window"
+            detail = (f"Each new all-time high is a scale-out step. A weekly close below the 20-week MA "
+                      f"(${w20_now:,.0f}) triggers the exit signal.")
+        elif st["triggers"]:
+            t = st["triggers"][-1]
+            status, label = "triggered", "Exit signal triggered"
+            detail = (f"Weekly close ${t['price']:,.0f} on {date.fromisoformat(t['date']):%-d %b %Y} fell below the 20-week MA, "
+                      f"{abs(t['from_high']) * 100:.0f}% under the ${t['high']:,.0f} high.")
+        else:
+            status, label = "watch", "Watching: exit window open"
+            detail = "No new all-time high yet in this window. The signal arms on the first one."
+    else:
+        nxt = add_months(NEXT_HALVING_EST, EXIT_WINDOW[0])
+        if st["triggers"]:
+            t = st["triggers"][-1]
+            status, label = "closed", f"Fired {date.fromisoformat(t['date']):%b %Y} · window closed"
+            detail = (f"This cycle's signal fired on {date.fromisoformat(t['date']):%-d %b %Y} at ${t['price']:,.0f}, "
+                      f"{abs(t['from_high']) * 100:.0f}% below the ${t['high']:,.0f} top. Next exit window opens ≈ {nxt:%b %Y}.")
+        else:
+            status, label = "closed", "Window closed · no signal"
+            detail = f"No exit signal fired this cycle. Next exit window opens ≈ {nxt:%b %Y}."
+    fired_recently = bool(st["triggers"]) and (today - date.fromisoformat(st["triggers"][-1]["date"])).days <= 7
+    return {
+        "status": status, "label": label, "detail": detail,
+        "window_start": st["start"].isoformat(), "window_end": st["end"].isoformat(),
+        "ma20w": w20_now, "price_vs_ma20w": price[-1] / w20_now - 1 if w20_now else None,
+        "new_high_today": st["new_high_today"] and status == "armed",
+        "fired_recently": fired_recently and status in ("triggered", "closed"),
+        "events": events,
     }
 
 

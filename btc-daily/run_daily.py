@@ -46,16 +46,26 @@ def notification_summary(cycle, news, brief, spot) -> dict:
     hist = cycle["history"]
     prev_zone = zone_for(hist[-2]["s"]) if len(hist) > 1 else cycle["zone"]
     zone_changed = prev_zone["key"] != cycle["zone"]["key"]
+    ex = cycle["exit"]
     lines = []
+    if ex["fired_recently"]:
+        lines.append(f"EXIT SIGNAL: {ex['detail']}")
+    elif ex["new_high_today"]:
+        lines.append("New all-time high in the exit window: scale-out step.")
     if zone_changed:
         lines.append(f"Zone changed: {prev_zone['label']} → {cycle['zone']['label']}")
     lines.append(f"{render.pct(cycle['change_1d'])} 24h · {render.pct(cycle['change_30d'])} 30d · "
                  f"{abs(cycle['ath']['drawdown']) * 100:.0f}% below ATH")
     lines.append(render.playbook_action(cycle["zone"]))
+    if not (ex["fired_recently"] or ex["new_high_today"]):
+        lines.append(f"Exit signal: {ex['label']}")
     lines += [f"• {p}" for p in summ["news"]]
+    priority = 5 if ex["fired_recently"] else 4 if (ex["new_high_today"] or zone_changed) else 3
+    title_prefix = "EXIT SIGNAL · " if ex["fired_recently"] else "New ATH · " if ex["new_high_today"] else ""
     return {
         "date": cycle["as_of"], "zone_key": cycle["zone"]["key"], "zone_changed": zone_changed,
-        "title": f"BTC {render.usd(price)} · Score {cycle['score']:.0f} · {cycle['zone']['label']}",
+        "priority": priority, "exit_status": ex["status"],
+        "title": f"{title_prefix}BTC {render.usd(price)} · Score {cycle['score']:.0f} · {cycle['zone']['label']}",
         "message": "\n".join(lines),
     }
 

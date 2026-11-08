@@ -23,9 +23,10 @@ def build_payload(summary: dict) -> dict:
         "topic": os.environ["NTFY_TOPIC"].strip(),
         "title": summary["title"],
         "message": summary["message"],
-        "tags": [ZONE_TAGS.get(summary["zone_key"], "white_circle")],
-        # louder notification only when the cycle zone changes
-        "priority": 4 if summary.get("zone_changed") else 3,
+        "tags": (["rotating_light"] if summary.get("priority", 3) >= 5 else [])
+                + [ZONE_TAGS.get(summary["zone_key"], "white_circle")],
+        # 5 = exit signal fired, 4 = new all-time high in exit window or zone change, 3 = normal day
+        "priority": summary.get("priority", 3),
     }
     if url:
         payload["click"] = url
