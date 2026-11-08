@@ -88,9 +88,9 @@ def exchange_flows() -> dict:
     (accumulation); rising balances mean more coins are sitting where they can be sold.
     (Coin Metrics' free daily in/out flow figures are preliminary and don't reconcile with balances, so only
     the balance itself is used.)"""
-    start = (date.today() - timedelta(days=75)).isoformat()
+    start = (date.today() - timedelta(days=400)).isoformat()
     url = ("https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=btc"
-           f"&metrics=SplyExNtv&frequency=1d&start_time={start}&page_size=200")
+           f"&metrics=SplyExNtv&frequency=1d&start_time={start}&page_size=1000")
     rows = [r for r in http_json(url)["data"] if r.get("SplyExNtv")]
     bal = [float(r["SplyExNtv"]) for r in rows]
     return {
@@ -99,7 +99,9 @@ def exchange_flows() -> dict:
         "change_7d": bal[-1] - bal[-8] if len(bal) > 7 else None,
         "change_30d": bal[-1] - bal[-31] if len(bal) > 30 else None,
         "change_30d_pct": bal[-1] / bal[-31] - 1 if len(bal) > 30 else None,
-        "series": [[r["time"][:10], round(v)] for r, v in zip(rows[-60:], bal[-60:])],
+        "change_1y": bal[-1] - bal[-366] if len(bal) > 365 else None,
+        "change_1y_pct": bal[-1] / bal[-366] - 1 if len(bal) > 365 else None,
+        "series": [[r["time"][:10], round(v)] for r, v in zip(rows, bal)],  # ~13 months, daily
         "source": "Coin Metrics",
     }
 

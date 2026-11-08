@@ -174,21 +174,22 @@ def etf_card(etf: dict) -> str:
 def exchange_card(ex: dict) -> str:
     if "error" in ex or not ex.get("series"):
         return '<div class="fcard"><span class="eyebrow dark">Coins on exchanges</span><p class="note">Unavailable today.</p></div>'
-    vals = [v for _, v in ex["series"]]
-    lo, hi = min(vals), max(vals)
-    pts = " ".join(f'{i / (len(vals) - 1) * 100:.2f},{(1 - (v - lo) / ((hi - lo) or 1)) * 36 + 2:.2f}' for i, v in enumerate(vals))
-    c7 = ex["change_7d"]
+    c7, c30, c1y = ex["change_7d"], ex["change_30d"], ex.get("change_1y")
     reading = ("More coins are sitting where they can be sold quickly." if c7 and c7 > 0
                else "Coins are leaving exchanges, usually into long-term storage.")
-    return f'''<div class="fcard">
-  <span class="eyebrow dark">Coins on exchanges</span>
-  <div class="fbig"><strong>{ex["balance"] / 1e6:.2f}M BTC</strong><span>held on exchanges</span></div>
-  <svg class="spark" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label="Exchange balance, last 60 days">
-    <polyline points="{pts}" fill="none" stroke="var(--s1)" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
-  <div class="kv2"><span>7 days</span><b class="{"neg" if c7 and c7 > 0 else "pos"}">{"+" if c7 >= 0 else "−"}{abs(c7):,.0f} BTC</b></div>
-  <div class="kv2"><span>30 days</span><b>{pct(ex["change_30d_pct"])}</b></div>
-  <p class="small">{reading}</p>
-  <em>60-day trend · Source: Coin Metrics</em>
+    btc = lambda v: "–" if v is None else f'{"+" if v >= 0 else "−"}{abs(v):,.0f} BTC'
+    cls = lambda v: "" if v is None else ("neg" if v > 0 else "pos")  # more coins on exchanges = more sell-side supply
+    return f'''<div class="fcard ex-card">
+  <div class="ex-head"><span class="eyebrow dark">Coins on exchanges</span>
+    <div class="ranges ex-ranges" role="group" aria-label="Exchange chart range">
+      <button data-xr="30">1M</button><button data-xr="90" class="on">3M</button><button data-xr="365">1Y</button></div></div>
+  <div class="fbig"><strong>{ex["balance"] / 1e6:.3f}M BTC</strong><span>held on exchanges · {fmt_date(ex["date"])}</span></div>
+  <div class="chart ex-chart" id="c-ex"></div>
+  <div class="kv2"><span>7 days</span><b class="{cls(c7)}">{btc(c7)}</b></div>
+  <div class="kv2"><span>30 days</span><b class="{cls(c30)}">{btc(c30)} <span class="muted small">{pct(ex["change_30d_pct"])}</span></b></div>
+  <div class="kv2"><span>1 year</span><b class="{cls(c1y)}">{btc(c1y)} <span class="muted small">{pct(ex.get("change_1y_pct"))}</span></b></div>
+  <p class="small">{reading} Hover or drag across the chart to see each day.</p>
+  <em>Daily balance on all tracked exchanges · Source: Coin Metrics</em>
 </div>'''
 
 
@@ -601,6 +602,7 @@ def dashboard(cycle, news, brief, macro, spot, generated_at: str, market: dict) 
     today_long = datetime.now().strftime("%A, %-d %B %Y")
     hist = [[x["d"], x["p"], x["s"], x["w"], x["r"], x["m"]] for x in cycle["history"]]
     data_json = json.dumps({"h": hist, "zones": [[u, ZONE_COLORS[k], l] for u, k, l, _ in ZONES],
+                            "ex": (market.get("flows") or {}).get("exchanges", {}).get("series", []),
                             "exits": [[f["date"], f["price"], 1] for f, _ in _cycle_exits(cycle)]
                                      + [[x["date"], x["price"], 0] for _, ea in _cycle_exits(cycle) for x in ea]}).replace("</", "<\\/")
     ai_note = f'Analysed by {e(brief["model"])}' if brief else "Filtered headlines · add an Anthropic key for analysis"
@@ -971,6 +973,9 @@ td{border-bottom:1px solid var(--grid);padding:10px 8px;vertical-align:top}tbody
 .ec-key .k.in{background:var(--s1)}.ec-key .k.out{background:var(--down)}
 .movers{margin-top:6px}.mover{display:flex;justify-content:space-between;font-size:13.5px;padding:4px 0;border-top:1px solid var(--grid);font-variant-numeric:tabular-nums}
 .spark{width:100%;height:44px;margin:6px 0}
+.ex-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.ex-ranges button{font-size:12px;padding:3px 9px}
+.chart.ex-chart{height:190px;margin:6px 0 4px;touch-action:pan-y}
 .kv2{display:flex;justify-content:space-between;font-size:13.5px;padding:3px 0;border-top:1px solid var(--grid);font-variant-numeric:tabular-nums}
 .tr-table{font-size:13px}.tr-table td,.tr-table th{padding:5px 4px}
 .tone{font-size:11px;font-weight:700;border-radius:6px;padding:2px 8px}
@@ -1020,6 +1025,7 @@ function visible(){const last=rows[rows.length-1].t,span={all:Infinity,'4y':4*36
 function chart(id,cfg){
   const box=document.getElementById(id);box.innerHTML='';
   const W=box.clientWidth,H=box.clientHeight,gutter=W>=560,m={l:58,r:gutter?132:12,t:14,b:26};
+  if(W<160||H<60)return null;  // not laid out yet (hidden tab); redrawn on resize
   const data=visible(),x0=data[0].t,x1=data[data.length-1].t,X=t=>m.l+(t-x0)/(x1-x0)*(W-m.l-m.r);
   let lo,hi;
   if(cfg.log){lo=Infinity;hi=0;for(const r of data)for(const s of cfg.series){const v=r[s.k];if(v){lo=Math.min(lo,v);hi=Math.max(hi,v)}}lo=Math.log10(lo*0.9);hi=Math.log10(hi*1.1)}
@@ -1068,22 +1074,82 @@ function chart(id,cfg){
       dots[i].setAttribute('cx',x);dots[i].setAttribute('cy',Y(v));dots[i].setAttribute('visibility','visible');
       h+='<div class="r"><span>'+s.label+'</span><b>'+s.f(v)+'</b></div>'});
     if(cfg.bands)h+='<div class="r"><span>Zone</span><b>'+zoneOf(r.s)[2]+'</b></div>';
-    tip.innerHTML=h;tip.style.display='block';const tw=tip.offsetWidth;tip.style.left=(x+12+tw>W-m.r?x-12-tw:x+12)+'px';tip.style.top='8px'}
+    tip.innerHTML=h;tip.style.display='block';const tw=tip.offsetWidth;tip.style.left=Math.max(0,Math.min(W-tw,x+12+tw>W?x-12-tw:x+12))+'px';tip.style.top='8px'}
   function hide(){vline.setAttribute('visibility','hidden');dots.forEach(d=>d.setAttribute('visibility','hidden'));tip.style.display='none'}
   function move(ev){const rect=svg.getBoundingClientRect();const px=(ev.touches?ev.touches[0].clientX:ev.clientX)-rect.left;
-    const t=x0+(px-m.l)/(W-m.l-m.r)*(x1-x0);charts.forEach(c=>c.show(t))}
+    const t=x0+(px-m.l)/(W-m.l-m.r)*(x1-x0);charts.forEach(c=>c&&c.show(t))}
   hit.addEventListener('mousemove',move);hit.addEventListener('touchmove',move,{passive:true});
-  hit.addEventListener('mouseleave',()=>charts.forEach(c=>c.hide()));
+  hit.addEventListener('mouseleave',()=>charts.forEach(c=>c&&c.hide()));
   return {show,hide};
 }
 const priceSeries=[{k:'p',label:'BTC price',short:'BTC',c:'--s1',f:fmtUsd},{k:'m',label:'50-day MA (exit line)',short:'50D',c:'--s4',f:fmtUsd,w:1.75},
   {k:'w',label:'200-week MA',short:'200W',c:'--s2',f:fmtUsd},{k:'r',label:'Realized price',short:'Realized',c:'--s3',f:fmtUsd}];
 function legend(){document.getElementById('lg-price').innerHTML=priceSeries.map(s=>'<span><i style="background:'+css(s.c)+'"></i>'+s.label+'</span>').join('')}
+
+// ---------- coins on exchanges: interactive daily chart (scale, dates, cursor)
+let exRange=90;
+function exChart(){
+  const box=document.getElementById('c-ex');if(!box||!D.ex||!D.ex.length)return;box.innerHTML='';
+  const all=D.ex.map(r=>({t:Date.parse(r[0]),v:r[1]}));const data=all.slice(-exRange);
+  const priceAt=new Map(rows.map(r=>[r.d,r.p]));
+  const W=box.clientWidth,H=box.clientHeight,m={l:52,r:10,t:10,b:24};
+  if(W<120||H<60)return;
+  const x0=data[0].t,x1=data[data.length-1].t,X=t=>m.l+(t-x0)/(x1-x0||1)*(W-m.l-m.r);
+  let lo=Math.min(...data.map(d=>d.v)),hi=Math.max(...data.map(d=>d.v));const pad=(hi-lo)*.12||5000;lo-=pad;hi+=pad;
+  const Y=v=>m.t+(1-(v-lo)/(hi-lo))*(H-m.t-m.b);
+  const svg=el('svg',{width:W,height:H,role:'img','aria-label':'BTC held on exchanges, daily'},box);
+  // y scale: round steps in BTC
+  const span=hi-lo,raw=span/4,mag=10**Math.floor(Math.log10(raw)),step=[1,2,2.5,5,10].map(k=>k*mag).find(s=>s>=raw);
+  for(let v=Math.ceil(lo/step)*step;v<=hi;v+=step){const y=Y(v);el('line',{x1:m.l,x2:W-m.r,y1:y,y2:y,stroke:css('--grid')},svg);
+    const t=el('text',{x:m.l-8,y:y+4,'text-anchor':'end','font-size':11,fill:css('--muted'),'font-variant-numeric':'tabular-nums'},svg);
+    t.textContent=(v/1e6).toFixed(step<1e4?3:2)+'M'}
+  // x scale: months (or weeks for 1M)
+  const d=new Date(x0);d.setUTCHours(0,0,0,0);
+  if(exRange<=31){d.setUTCDate(d.getUTCDate()+((8-d.getUTCDay())%7));for(;d.getTime()<=x1;d.setUTCDate(d.getUTCDate()+7)){const tx=el('text',{x:X(d.getTime()),y:H-6,'text-anchor':'middle','font-size':11,fill:css('--muted')},svg);
+      tx.textContent=d.toLocaleDateString('en-GB',{day:'numeric',month:'short',timeZone:'UTC'})}}
+  else{d.setUTCDate(1);d.setUTCMonth(d.getUTCMonth()+1);const every=exRange>200?2:1;let i=0;
+    for(;d.getTime()<=x1;d.setUTCMonth(d.getUTCMonth()+1),i++){if(i%every)continue;const tx=el('text',{x:X(d.getTime()),y:H-6,'text-anchor':'middle','font-size':11,fill:css('--muted')},svg);
+      tx.textContent=d.toLocaleDateString('en-GB',{month:'short',year:d.getUTCMonth()===0?'2-digit':undefined,timeZone:'UTC'})}}
+  el('line',{x1:m.l,x2:W-m.r,y1:H-m.b,y2:H-m.b,stroke:css('--axis')},svg);
+  // area + line
+  let p='';data.forEach((r,i)=>p+=(i?'L':'M')+X(r.t).toFixed(1)+' '+Y(r.v).toFixed(1));
+  const gid='exg'+Math.random().toString(36).slice(2,7),defs=el('defs',{},svg),gr=el('linearGradient',{id:gid,x1:0,y1:0,x2:0,y2:1},defs);
+  el('stop',{offset:'0%','stop-color':css('--s1'),'stop-opacity':.25},gr);el('stop',{offset:'100%','stop-color':css('--s1'),'stop-opacity':0},gr);
+  el('path',{d:p+'L'+X(x1)+' '+(H-m.b)+'L'+X(x0)+' '+(H-m.b)+'Z',fill:'url(#'+gid+')'},svg);
+  el('path',{d:p,fill:'none',stroke:css('--s1'),'stroke-width':2,'stroke-linejoin':'round'},svg);
+  // last value marker
+  const L=data[data.length-1];el('circle',{cx:X(L.t),cy:Y(L.v),r:3.5,fill:css('--s1')},svg);
+  // cursor
+  const vline=el('line',{y1:m.t,y2:H-m.b,stroke:css('--muted'),'stroke-dasharray':'3 3',visibility:'hidden'},svg);
+  const dot=el('circle',{r:4.5,fill:css('--s1'),stroke:css('--surface'),'stroke-width':2,visibility:'hidden'},svg);
+  const tip=document.createElement('div');tip.className='tip';box.appendChild(tip);
+  const hit=el('rect',{x:m.l,y:0,width:W-m.l-m.r,height:H,fill:'transparent'},svg);
+  const idxAll=new Map(all.map((r,i)=>[r.t,i]));
+  const fmtB=v=>Math.round(v).toLocaleString('en-US')+' BTC',sgn=v=>(v>=0?'+':'−')+Math.abs(Math.round(v)).toLocaleString('en-US');
+  function move(ev){const rect=svg.getBoundingClientRect();const px=(ev.touches?ev.touches[0].clientX:ev.clientX)-rect.left;
+    const t=x0+(px-m.l)/(W-m.l-m.r)*(x1-x0);let a=0,b=data.length-1;while(b-a>1){const mid=(a+b)>>1;if(data[mid].t<t)a=mid;else b=mid}
+    const r=Math.abs(data[a].t-t)<Math.abs(data[b].t-t)?data[a]:data[b],x=X(r.t),gi=idxAll.get(r.t);
+    const prev=gi>0?all[gi-1].v:null,wk=gi>=7?all[gi-7].v:null,iso=new Date(r.t).toISOString().slice(0,10),pr=priceAt.get(iso);
+    vline.setAttribute('x1',x);vline.setAttribute('x2',x);vline.setAttribute('visibility','visible');
+    dot.setAttribute('cx',x);dot.setAttribute('cy',Y(r.v));dot.setAttribute('visibility','visible');
+    const c=v=>v==null?'':'<b style="color:'+css(v>0?'--down':'--s1')+'">'+sgn(v)+'</b>';
+    tip.innerHTML='<b>'+fmtDate(r.t)+'</b><div class="r"><span>On exchanges</span><b>'+fmtB(r.v)+'</b></div>'+
+      (prev!=null?'<div class="r"><span>vs day before</span>'+c(r.v-prev)+'</div>':'')+
+      (wk!=null?'<div class="r"><span>vs week before</span>'+c(r.v-wk)+'</div>':'')+
+      (pr?'<div class="r"><span>BTC price</span><b>'+fmtUsd(pr)+'</b></div>':'');
+    tip.style.display='block';const tw=tip.offsetWidth;tip.style.left=Math.max(0,Math.min(W-tw,x+12+tw>W?x-12-tw:x+12))+'px';tip.style.top='4px'}
+  function leave(){vline.setAttribute('visibility','hidden');dot.setAttribute('visibility','hidden');tip.style.display='none'}
+  hit.addEventListener('mousemove',move);hit.addEventListener('touchstart',move,{passive:true});hit.addEventListener('touchmove',move,{passive:true});
+  hit.addEventListener('mouseleave',leave);hit.addEventListener('touchend',()=>setTimeout(leave,1800));
+}
+document.querySelectorAll('.ex-ranges button').forEach(b=>b.addEventListener('click',()=>{exRange=+b.dataset.xr;
+  document.querySelectorAll('.ex-ranges button').forEach(x=>x.classList.toggle('on',x===b));exChart()}));
 function draw(){
   charts.length=0;
   charts.push(chart('c-score',{series:[{k:'s',label:'Cycle score',c:'--ink',f:v=>v.toFixed(0)}],bands:true,aria:'Cycle score over time with zone bands'}));
   charts.push(chart('c-price',{series:priceSeries,log:true,endLabels:true,aria:'BTC price, 50-day and 200-week moving averages and realized price, log scale'}));
   legend();
+  exChart();
 }
 document.querySelectorAll('.ranges button').forEach(b=>b.addEventListener('click',()=>{range=b.dataset.r;
   document.querySelectorAll('.ranges button').forEach(x=>x.classList.toggle('on',x===b));draw()}));
