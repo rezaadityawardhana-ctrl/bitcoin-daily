@@ -1,0 +1,65 @@
+# Runs every morning in GitHub's cloud (your Mac can be off):
+# builds the dashboard, publishes it to GitHub Pages, then pushes a notification to your iPhone.
+name: Bitcoin Daily
+
+on:
+  schedule:
+    - cron: "45 5 * * *"   # 05:45 UTC ≈ 06:45 CET / 07:45 CEST (GitHub may start a few minutes late)
+  workflow_dispatch:        # "Run workflow" button for a manual run
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: bitcoin-daily
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    defaults:
+      run:
+        working-directory: btc-daily
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the optional AI dependency
+        run: pip install anthropic
+
+      - name: Build dashboard
+        run: python3 run_daily.py --no-email --no-notify
+
+      - name: Prepare site
+        run: |
+          mkdir -p ../site
+          cp output/index.html ../site/index.html
+          cp output/summary.json ../site/summary.json
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Publish to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Notify iPhone
+        if: ${{ env.NTFY_TOPIC != '' }}
+        env:
+          DASHBOARD_URL: ${{ steps.deploy.outputs.page_url }}
+        run: python3 notify.py
